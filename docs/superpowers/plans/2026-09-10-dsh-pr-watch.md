@@ -1883,6 +1883,11 @@ Expected: no lint errors. Fix anything reported; re-run until clean.
 
 - [ ] **Step 3: Write `README.md`**
 
+> **Note:** `README.md` and `LICENSE` were already committed before implementation
+> began. Skip writing them; instead **verify** the existing README still satisfies
+> the requirements below once the real output is known, and update any sample
+> output that no longer matches `renderWatch()`.
+
 Must contain, at minimum: what the tool does; the two-phase fetch explained in
 one short paragraph; a usage example; the configuration table (`staleDays`
 default 14, `pruneDays` default 90, snapshot at `$DSH_HOME/pr-watch/snapshot.json`);
