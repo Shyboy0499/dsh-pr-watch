@@ -1,0 +1,4 @@
+# dsh-pr-watch bundle registration.
+- insert:
+    - id: pr-watch
+      name: dsh-pr-watch

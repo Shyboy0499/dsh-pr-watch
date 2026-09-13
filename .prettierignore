@@ -1,0 +1,8 @@
+# Local package-manager state. Both are redirected inside the workspace by
+# .npmrc, and neither is source: formatting them would be pointless churn.
+.npm-cache/
+.pnpm-store/
+
+# Build output.
+lib/
+dist/

@@ -19,7 +19,7 @@ lists and `dsh-*` plugin projects. Keeping track of them is manual:
 
 None of these are visible without opening GitHub. A session on 2026-09-10
 involved re-checking five parked PRs and repeatedly re-confirming merges by hand.
-The friction is not *seeing* the PRs — it is *re-checking* the same PRs over and
+The friction is not _seeing_ the PRs — it is _re-checking_ the same PRs over and
 over and having to remember what the state was last time.
 
 The dsh harness has no memory of a previous check. Anything the agent reports is
@@ -119,7 +119,7 @@ renames and works for repositories that have never been cloned.
 ### Fetch strategy
 
 A naive design fetches open PRs and diffs against the snapshot. **This breaks
-the primary feature.** The instant a PR merges it *leaves* the open list, so a
+the primary feature.** The instant a PR merges it _leaves_ the open list, so a
 snapshot-versus-open diff cannot distinguish "merged" from "closed unmerged" —
 and an empty result is indistinguishable from a failed `gh` invocation.
 
@@ -135,20 +135,20 @@ The watch therefore performs two phases:
    `gh pr view <url> --json state,mergedAt`
 
 Only PRs that actually changed incur a second call — typically zero or one per
-check. This is what makes *merged* versus *closed unmerged* distinguishable, and
+check. This is what makes _merged_ versus _closed unmerged_ distinguishable, and
 it keeps the request count bounded even though the author's lifetime PR count
 exceeds one thousand.
 
 ### Delta semantics
 
-| Transition | Reported as |
-|---|---|
-| snapshot `OPEN` → resolved `MERGED` | **merged** |
-| snapshot `OPEN` → resolved `CLOSED` (unmerged) | **closed without merge** |
-| `staleReported: false` → open and `updatedAt` older than `staleDays` | **became stale** |
-| present in GitHub's open set, absent from snapshot | **newly noticed** |
-| already `staleReported: true` | *silence* — never re-reported |
-| already terminal (`MERGED` / `CLOSED`) | *silence* — never re-reported |
+| Transition                                                           | Reported as                   |
+| -------------------------------------------------------------------- | ----------------------------- |
+| snapshot `OPEN` → resolved `MERGED`                                  | **merged**                    |
+| snapshot `OPEN` → resolved `CLOSED` (unmerged)                       | **closed without merge**      |
+| `staleReported: false` → open and `updatedAt` older than `staleDays` | **became stale**              |
+| present in GitHub's open set, absent from snapshot                   | **newly noticed**             |
+| already `staleReported: true`                                        | _silence_ — never re-reported |
+| already terminal (`MERGED` / `CLOSED`)                               | _silence_ — never re-reported |
 
 The silence rows are the entire point of the plugin. Stale is reported once, on
 transition, and then goes quiet. Merges are recorded once and never resurface.
@@ -159,21 +159,21 @@ are pruned on write.
 
 ### Configuration
 
-| Key | Default | Purpose |
-|---|---|---|
-| `staleDays` | `14` | Days without activity before a PR is reported stale |
-| `snapshotPath` | `$DSH_HOME/pr-watch/snapshot.json` | Override the snapshot location |
-| `ignoreRepos` | `[]` | `owner/repo` entries to exclude from tracking |
-| `pruneDays` | `90` | Drop terminal entries older than this |
+| Key            | Default                            | Purpose                                             |
+| -------------- | ---------------------------------- | --------------------------------------------------- |
+| `staleDays`    | `14`                               | Days without activity before a PR is reported stale |
+| `snapshotPath` | `$DSH_HOME/pr-watch/snapshot.json` | Override the snapshot location                      |
+| `ignoreRepos`  | `[]`                               | `owner/repo` entries to exclude from tracking       |
+| `pruneDays`    | `90`                               | Drop terminal entries older than this               |
 
 ### Tool surface
 
 A single tool, `pr_watch`.
 
-| Parameter | Type | Purpose |
-|---|---|---|
-| `staleDays` | `number` (optional) | Override the configured staleness threshold for this call |
-| `all` | `boolean` (optional) | Dump full current state instead of only deltas |
+| Parameter   | Type                 | Purpose                                                   |
+| ----------- | -------------------- | --------------------------------------------------------- |
+| `staleDays` | `number` (optional)  | Override the configured staleness threshold for this call |
+| `all`       | `boolean` (optional) | Dump full current state instead of only deltas            |
 
 The `all` flag exists because on first run every PR is "newly noticed" and a
 delta-only view is pure noise. `all` gives the user a baseline.
@@ -183,14 +183,14 @@ new), with a structured output schema alongside it so the result is scriptable.
 
 ### Error handling
 
-| Failure | Behavior |
-|---|---|
-| `gh` not installed | Structured error naming the missing binary and pointing at cli.github.com |
-| `gh` not authenticated | Structured error instructing `gh auth login` |
-| Snapshot corrupt or unparseable | Rename to `snapshot.corrupt-<n>.json`, start fresh, and **state this in the output** |
-| Fetch fails mid-run | **Do not write the snapshot** — pending deltas survive to the next successful run |
+| Failure                                    | Behavior                                                                                        |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| `gh` not installed                         | Structured error naming the missing binary and pointing at cli.github.com                       |
+| `gh` not authenticated                     | Structured error instructing `gh auth login`                                                    |
+| Snapshot corrupt or unparseable            | Rename to `snapshot.corrupt-<n>.json`, start fresh, and **state this in the output**            |
+| Fetch fails mid-run                        | **Do not write the snapshot** — pending deltas survive to the next successful run               |
 | Terminal-state resolution fails for one PR | Leave the entry as `OPEN`, report it under a separate "could not resolve" heading, and continue |
-| Rate limit hit | Report the limit and the reset time; do not write the snapshot |
+| Rate limit hit                             | Report the limit and the reset time; do not write the snapshot                                  |
 
 Two of these deserve emphasis. The corrupt-snapshot path must never silently
 reset: a silent reset would discard pending deltas without the user knowing, and
@@ -219,7 +219,7 @@ that reads as "every PR vanished."
 **A PR opened and merged between two checks is invisible.** It is absent from the
 open set (it already merged) and absent from the snapshot (it never existed when
 the snapshot was taken), so neither query sees it. This is a direct consequence
-of enumerating by *current* open state rather than by *activity window*.
+of enumerating by _current_ open state rather than by _activity window_.
 
 In practice this is unlikely: the author opens PRs deliberately and would know
 about one that landed that fast. It becomes a real gap only if checks are spaced
@@ -238,7 +238,7 @@ These were deliberately excluded and are recorded so the reasoning is not lost.
 
 **New comments and reviews.** The author's single most consequential PR event on
 2026-09-10 was a maintainer comment on PR #339 that contradicted a dead-link
-verdict. Merged/closed is an *outcome*; a comment is the thing that changes what
+verdict. Merged/closed is an _outcome_; a comment is the thing that changes what
 the author does next. It is deferred because the author judged it visible the
 moment a PR is opened, whereas merged and stale are not. Adding it requires a
 second data source (review and comment timestamps) and a per-entry
@@ -260,11 +260,11 @@ Supporting several would require keying entries by account as well.
 
 ## Decisions log
 
-| Decision | Choice | Rationale |
-|---|---|---|
-| Delivery model | Delta on demand | No daemon to manage; the delta is the only thing the harness cannot already derive |
-| Scope | Authored PRs only | Unambiguous definition of "mine"; review-requested sets are fuzzy |
-| Storage | Self-contained JSON | Avoids coupling to `dsh-note`, which is owned by a different maintainer |
-| Identity key | `owner/repo#number` | Stable across local rename; works for uncloned repositories |
-| Staleness | 14 days, reported once | Matches the observed cadence of the author's parked PRs |
-| Terminal-state resolution | Per-PR `gh pr view` | Distinguishes merged from closed, at bounded cost |
+| Decision                  | Choice                 | Rationale                                                                          |
+| ------------------------- | ---------------------- | ---------------------------------------------------------------------------------- |
+| Delivery model            | Delta on demand        | No daemon to manage; the delta is the only thing the harness cannot already derive |
+| Scope                     | Authored PRs only      | Unambiguous definition of "mine"; review-requested sets are fuzzy                  |
+| Storage                   | Self-contained JSON    | Avoids coupling to `dsh-note`, which is owned by a different maintainer            |
+| Identity key              | `owner/repo#number`    | Stable across local rename; works for uncloned repositories                        |
+| Staleness                 | 14 days, reported once | Matches the observed cadence of the author's parked PRs                            |
+| Terminal-state resolution | Per-PR `gh pr view`    | Distinguishes merged from closed, at bounded cost                                  |

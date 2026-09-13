@@ -4,7 +4,7 @@
 
 **Goal:** Build `dsh-pr-watch`, a DeepSeek Harness plugin exposing one `pr_watch` tool that reports what changed in the user's authored GitHub pull requests since the last check.
 
-**Architecture:** A pure `diff()` function owns all state-transition logic; everything else is IO around it. The tool fetches currently-open PRs with one `gh search`, then resolves each snapshot entry that *left* the open set individually with `gh pr view`, so merged is distinguishable from closed-unmerged. State lives in one JSON snapshot keyed by `owner/repo#number`, written atomically.
+**Architecture:** A pure `diff()` function owns all state-transition logic; everything else is IO around it. The tool fetches currently-open PRs with one `gh search`, then resolves each snapshot entry that _left_ the open set individually with `gh pr view`, so merged is distinguishable from closed-unmerged. State lives in one JSON snapshot keyed by `owner/repo#number`, written atomically.
 
 **Tech Stack:** TypeScript (ESM, `strict`), `@deepseek-ai/dsh-tools` `defineTool`, `@deepseek-ai/cordis` plugin shape, `gh` CLI for data, Vitest, oxlint, Prettier, tsdown.
 
@@ -14,24 +14,34 @@
 
 ---
 
-## Two deliberate refinements to the spec
+## Three deliberate refinements to the spec
 
-Both are improvements discovered while planning; flagging rather than silently deviating.
+All are decisions discovered while planning or implementing; flagging rather than silently deviating.
 
 1. **`diff()` returns `{ deltas, next }`, not just `Delta[]`.** Computing the next snapshot is state logic, so it belongs in the pure core. This keeps `snapshot.ts` purely about IO and makes the state transition directly testable.
 
 2. **`pruneTerminal()` lives in `delta.ts`, not `snapshot.ts`.** Same reason — it is pure state logic. `snapshot.ts` calls it during save.
 
+3. **The spec's `ignoreRepos` and `snapshotPath` configuration keys are deferred to v2; this plan is authoritative for the v1 surface.** The spec's Configuration table lists four keys, but only two of them — `staleDays` and `pruneDays` — ever became real, and neither is user-settable: `staleDays` is a tool parameter with a default, `pruneDays` is the `DEFAULT_PRUNE_DAYS` constant. Decided explicitly during implementation, so that the README stops advertising settings that have no entry point.
+
+   Concretely:
+
+   - **`ignoreRepos` is not implemented.** It is not merely a filter: an entry removed from the enumeration but left in the snapshot would never resolve, so `diff()` would report it as `unresolved` on every single check — a permanent false alarm. Doing it correctly requires a snapshot-eviction rule plus tests, which is why it is a v2 item rather than a small addition. Until then, every authored pull request is tracked.
+   - **`snapshotPath` is not user-configurable.** `snapshotPath(override?)` keeps its optional argument — it is exercised by the `snapshot.test.ts` override case — but nothing in v1 reads a setting to populate it. The snapshot location is resolved from `DSH_HOME` only.
+   - Neither key needs new code to stay honest: `src/types.ts` is unaffected, and no task in this plan reads a config file.
+
+   Closing the gap requires a dsh settings loader that does not exist yet, so it is a deliberate v2 candidate rather than an omission.
+
 ## File structure
 
-| File | Responsibility |
-|---|---|
-| `src/types.ts` | Type definitions + tunable constants. No logic beyond `prKey`/`emptySnapshot`. |
-| `src/delta.ts` | **Pure.** `diff()` and `pruneTerminal()`. No fs, no network, no clock. |
-| `src/snapshot.ts` | IO only: path resolution, load, quarantine-on-corrupt, atomic save. |
-| `src/gh-exec.ts` | `gh` invocation, argument builders, JSON→record mapping, error mapping. |
-| `src/tools/watch.ts` | `defineTool` wrapper + pure `renderWatch()`. Orchestration only. |
-| `src/index.ts` | Plugin registration (`name`, `inject`, `apply`). |
+| File                 | Responsibility                                                                 |
+| -------------------- | ------------------------------------------------------------------------------ |
+| `src/types.ts`       | Type definitions + tunable constants. No logic beyond `prKey`/`emptySnapshot`. |
+| `src/delta.ts`       | **Pure.** `diff()` and `pruneTerminal()`. No fs, no network, no clock.         |
+| `src/snapshot.ts`    | IO only: path resolution, load, quarantine-on-corrupt, atomic save.            |
+| `src/gh-exec.ts`     | `gh` invocation, argument builders, JSON→record mapping, error mapping.        |
+| `src/tools/watch.ts` | `defineTool` wrapper + pure `renderWatch()`. Orchestration only.               |
+| `src/index.ts`       | Plugin registration (`name`, `inject`, `apply`).                               |
 
 Tests mirror the pure surface: `delta`, `snapshot`, `gh-exec`, `render`.
 
@@ -40,6 +50,7 @@ Tests mirror the pure surface: `delta`, `snapshot`, `gh-exec`, `render`.
 ## Task 1: Project scaffolding
 
 **Files:**
+
 - Create: `package.json`, `tsconfig.json`, `tsdown.config.ts`, `cordis.patch.yml`, `LICENSE`, `SECURITY.md`, `src/index.ts`, `tests/smoke.test.ts`
 
 - [ ] **Step 1: Write `package.json`**
@@ -55,7 +66,13 @@ Tests mirror the pure surface: `delta`, `snapshot`, `gh-exec`, `render`.
     "type": "git",
     "url": "git+https://github.com/Shyboy0499/dsh-pr-watch.git"
   },
-  "keywords": ["deepseek-harness", "dsh", "dsh-plugin", "pull-request", "agent-tools"],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "pull-request",
+    "agent-tools"
+  ],
   "engines": { "node": ">=18" },
   "type": "module",
   "main": "lib/index.js",
@@ -220,6 +237,7 @@ git commit -m "chore: scaffold dsh-pr-watch plugin"
 ## Task 2: Types and constants
 
 **Files:**
+
 - Create: `src/types.ts`
 - Test: `tests/types.test.ts`
 
@@ -243,11 +261,17 @@ describe("types", () => {
   });
 
   it("keys a pull request as owner/repo#number", () => {
-    expect(prKey({ nameWithOwner: "octo/repo", number: 42 })).toBe("octo/repo#42");
+    expect(prKey({ nameWithOwner: "octo/repo", number: 42 })).toBe(
+      "octo/repo#42",
+    );
   });
 
   it("builds an empty snapshot", () => {
-    expect(emptySnapshot()).toEqual({ version: 1, lastCheck: "", pullRequests: {} });
+    expect(emptySnapshot()).toEqual({
+      version: 1,
+      lastCheck: "",
+      pullRequests: {},
+    });
   });
 });
 ```
@@ -328,6 +352,7 @@ git commit -m "feat: add core types and defaults"
 ## Task 3: Pure test fixtures
 
 **Files:**
+
 - Create: `tests/fixtures.ts`
 
 No test of its own — it exists to keep the delta tests readable.
@@ -362,7 +387,9 @@ export function record(overrides: Partial<PrRecord> = {}): PrRecord {
 }
 
 /** A snapshot containing the given records. */
-export function snapshot(pullRequests: Record<string, PrRecord> = {}): Snapshot {
+export function snapshot(
+  pullRequests: Record<string, PrRecord> = {},
+): Snapshot {
   return { version: SNAPSHOT_VERSION, lastCheck: daysAgo(1), pullRequests };
 }
 ```
@@ -387,6 +414,7 @@ The load-bearing behaviour: a PR that left the open set and resolved to a termin
 state must be reported exactly once.
 
 **Files:**
+
 - Create: `src/delta.ts`
 - Test: `tests/delta.test.ts`
 
@@ -522,7 +550,8 @@ export function diff(
       delete stillOpen[key];
       const age = ageInDays(fresh.updatedAt, now);
       const isStale = age >= staleDays;
-      const staleReported = fresh.updatedAt === previous.updatedAt ? previous.staleReported : false;
+      const staleReported =
+        fresh.updatedAt === previous.updatedAt ? previous.staleReported : false;
       if (isStale && !staleReported) {
         deltas.push(toDelta("stale", key, fresh));
         next[key] = { ...fresh, staleReported: true };
@@ -538,13 +567,19 @@ export function diff(
       next[key] = previous;
       continue;
     }
-    deltas.push(toDelta(terminal === "MERGED" ? "merged" : "closed", key, previous));
+    deltas.push(
+      toDelta(terminal === "MERGED" ? "merged" : "closed", key, previous),
+    );
     next[key] = { ...previous, state: terminal };
   }
 
   return {
     deltas,
-    next: { version: SNAPSHOT_VERSION, lastCheck: now.toISOString(), pullRequests: next },
+    next: {
+      version: SNAPSHOT_VERSION,
+      lastCheck: now.toISOString(),
+      pullRequests: next,
+    },
   };
 }
 
@@ -562,7 +597,8 @@ export function pruneTerminal(
 ): Snapshot {
   const kept: Record<string, PrRecord> = {};
   for (const [key, item] of Object.entries(snapshot.pullRequests)) {
-    if (item.state !== "OPEN" && ageInDays(item.updatedAt, now) > pruneDays) continue;
+    if (item.state !== "OPEN" && ageInDays(item.updatedAt, now) > pruneDays)
+      continue;
     kept[key] = item;
   }
   return { ...snapshot, pullRequests: kept };
@@ -586,6 +622,7 @@ git commit -m "feat: detect merged and closed pull requests in diff"
 ## Task 5: `diff()` — staleness fires once, and resets on activity
 
 **Files:**
+
 - Modify: `src/delta.ts` (already written in Task 4 — no change needed)
 - Modify: `tests/delta.test.ts` (append)
 
@@ -597,9 +634,16 @@ describe("diff — staleness", () => {
     const stale = record({ updatedAt: daysAgo(20) });
     const prev = snapshot({ "octo/repo#1": stale });
 
-    const { deltas, next } = diff(prev, { "octo/repo#1": stale }, new Map(), NOW);
+    const { deltas, next } = diff(
+      prev,
+      { "octo/repo#1": stale },
+      new Map(),
+      NOW,
+    );
 
-    expect(deltas).toEqual([{ ...toDeltaShape("stale"), updatedAt: stale.updatedAt }]);
+    expect(deltas).toEqual([
+      { ...toDeltaShape("stale"), updatedAt: stale.updatedAt },
+    ]);
     expect(next.pullRequests["octo/repo#1"].staleReported).toBe(true);
   });
 
@@ -625,29 +669,47 @@ describe("diff — staleness", () => {
     const fresh = record({ updatedAt: daysAgo(3) });
     const prev = snapshot({ "octo/repo#1": fresh });
 
-    const { deltas } = diff(prev, { "octo/repo#1": fresh }, new Map(), NOW, { staleDays: 2 });
+    const { deltas } = diff(prev, { "octo/repo#1": fresh }, new Map(), NOW, {
+      staleDays: 2,
+    });
 
     expect(deltas).toHaveLength(1);
     expect(deltas[0].kind).toBe("stale");
   });
 
   it("resets the stale flag when the pull request saw new activity", () => {
-    const previouslyStale = record({ updatedAt: daysAgo(20), staleReported: true });
+    const previouslyStale = record({
+      updatedAt: daysAgo(20),
+      staleReported: true,
+    });
     const nudge = record({ updatedAt: daysAgo(1) });
     const prev = snapshot({ "octo/repo#1": previouslyStale });
 
-    const { deltas, next } = diff(prev, { "octo/repo#1": nudge }, new Map(), NOW);
+    const { deltas, next } = diff(
+      prev,
+      { "octo/repo#1": nudge },
+      new Map(),
+      NOW,
+    );
 
     expect(deltas).toEqual([]);
     expect(next.pullRequests["octo/repo#1"].staleReported).toBe(false);
   });
 
   it("re-reports a nudged pull request that goes stale again", () => {
-    const previouslyStale = record({ updatedAt: daysAgo(40), staleReported: true });
+    const previouslyStale = record({
+      updatedAt: daysAgo(40),
+      staleReported: true,
+    });
     const nudge = record({ updatedAt: daysAgo(20) });
     const prev = snapshot({ "octo/repo#1": previouslyStale });
 
-    const { deltas, next } = diff(prev, { "octo/repo#1": nudge }, new Map(), NOW);
+    const { deltas, next } = diff(
+      prev,
+      { "octo/repo#1": nudge },
+      new Map(),
+      NOW,
+    );
 
     expect(deltas).toHaveLength(1);
     expect(deltas[0].kind).toBe("stale");
@@ -692,6 +754,7 @@ git commit -m "test: cover staleness transition and reset on activity"
 ## Task 6: `diff()` — new, unresolved, and carry-forward
 
 **Files:**
+
 - Modify: `tests/delta.test.ts` (append)
 
 - [ ] **Step 1: Append the failing tests**
@@ -700,15 +763,27 @@ git commit -m "test: cover staleness transition and reset on activity"
 describe("diff — new and unresolved", () => {
   it("reports a newly noticed pull request", () => {
     const fresh = record({ updatedAt: daysAgo(2) });
-    const { deltas, next } = diff(snapshot(), { "octo/repo#1": fresh }, new Map(), NOW);
+    const { deltas, next } = diff(
+      snapshot(),
+      { "octo/repo#1": fresh },
+      new Map(),
+      NOW,
+    );
 
-    expect(deltas).toEqual([{ ...toDeltaShape("new"), updatedAt: fresh.updatedAt }]);
+    expect(deltas).toEqual([
+      { ...toDeltaShape("new"), updatedAt: fresh.updatedAt },
+    ]);
     expect(next.pullRequests["octo/repo#1"].staleReported).toBe(false);
   });
 
   it("does not double-report a newly noticed pull request that is already stale", () => {
     const old = record({ updatedAt: daysAgo(30) });
-    const { deltas, next } = diff(snapshot(), { "octo/repo#1": old }, new Map(), NOW);
+    const { deltas, next } = diff(
+      snapshot(),
+      { "octo/repo#1": old },
+      new Map(),
+      NOW,
+    );
 
     expect(deltas.map((d) => d.kind)).toEqual(["new"]);
     expect(next.pullRequests["octo/repo#1"].staleReported).toBe(true);
@@ -727,7 +802,12 @@ describe("diff — new and unresolved", () => {
     const same = record({ updatedAt: daysAgo(2) });
     const prev = snapshot({ "octo/repo#1": same });
 
-    const { deltas, next } = diff(prev, { "octo/repo#1": same }, new Map(), NOW);
+    const { deltas, next } = diff(
+      prev,
+      { "octo/repo#1": same },
+      new Map(),
+      NOW,
+    );
 
     expect(deltas).toEqual([]);
     expect(next.pullRequests["octo/repo#1"]).toEqual(same);
@@ -761,6 +841,7 @@ git commit -m "test: cover newly noticed, unresolved, and carry-forward cases"
 ## Task 7: `pruneTerminal()`
 
 **Files:**
+
 - Modify: `tests/delta.test.ts` (append)
 
 - [ ] **Step 1: Append the failing tests**
@@ -768,7 +849,9 @@ git commit -m "test: cover newly noticed, unresolved, and carry-forward cases"
 ```ts
 describe("pruneTerminal", () => {
   it("drops a terminal entry older than the prune window", () => {
-    const input = snapshot({ "octo/repo#1": record({ state: "MERGED", updatedAt: daysAgo(120) }) });
+    const input = snapshot({
+      "octo/repo#1": record({ state: "MERGED", updatedAt: daysAgo(120) }),
+    });
 
     const result = pruneTerminal(input, NOW);
 
@@ -776,7 +859,9 @@ describe("pruneTerminal", () => {
   });
 
   it("keeps a recent terminal entry", () => {
-    const input = snapshot({ "octo/repo#1": record({ state: "MERGED", updatedAt: daysAgo(10) }) });
+    const input = snapshot({
+      "octo/repo#1": record({ state: "MERGED", updatedAt: daysAgo(10) }),
+    });
 
     const result = pruneTerminal(input, NOW);
 
@@ -784,7 +869,9 @@ describe("pruneTerminal", () => {
   });
 
   it("never prunes an open entry however old", () => {
-    const input = snapshot({ "octo/repo#1": record({ state: "OPEN", updatedAt: daysAgo(500) }) });
+    const input = snapshot({
+      "octo/repo#1": record({ state: "OPEN", updatedAt: daysAgo(500) }),
+    });
 
     const result = pruneTerminal(input, NOW);
 
@@ -792,7 +879,9 @@ describe("pruneTerminal", () => {
   });
 
   it("honours a pruneDays override", () => {
-    const input = snapshot({ "octo/repo#1": record({ state: "CLOSED", updatedAt: daysAgo(10) }) });
+    const input = snapshot({
+      "octo/repo#1": record({ state: "CLOSED", updatedAt: daysAgo(10) }),
+    });
 
     expect(pruneTerminal(input, NOW, 5).pullRequests).toEqual({});
   });
@@ -818,6 +907,7 @@ git commit -m "test: cover terminal pruning"
 ## Task 8: `snapshotPath()` resolution
 
 **Files:**
+
 - Create: `src/snapshot.ts`
 - Test: `tests/snapshot.test.ts`
 
@@ -838,17 +928,23 @@ afterEach(() => {
 describe("snapshotPath", () => {
   it("prefers DSH_HOME when set", () => {
     process.env.DSH_HOME = "/tmp/dsh-home";
-    expect(snapshotPath()).toBe(join("/tmp/dsh-home", "pr-watch", "snapshot.json"));
+    expect(snapshotPath()).toBe(
+      join("/tmp/dsh-home", "pr-watch", "snapshot.json"),
+    );
   });
 
   it("falls back to ~/.dsh when DSH_HOME is unset", () => {
     delete process.env.DSH_HOME;
-    expect(snapshotPath()).toBe(join(homedir(), ".dsh", "pr-watch", "snapshot.json"));
+    expect(snapshotPath()).toBe(
+      join(homedir(), ".dsh", "pr-watch", "snapshot.json"),
+    );
   });
 
   it("falls back to ~/.dsh when DSH_HOME is blank", () => {
     process.env.DSH_HOME = "   ";
-    expect(snapshotPath()).toBe(join(homedir(), ".dsh", "pr-watch", "snapshot.json"));
+    expect(snapshotPath()).toBe(
+      join(homedir(), ".dsh", "pr-watch", "snapshot.json"),
+    );
   });
 
   it("lets an explicit override win over the environment", () => {
@@ -875,9 +971,10 @@ import { SNAPSHOT_VERSION, emptySnapshot, type Snapshot } from "./types";
 export function snapshotPath(override?: string): string {
   if (override !== undefined && override.trim() !== "") return override;
   const configured = process.env.DSH_HOME?.trim();
-  const base = configured !== undefined && configured !== ""
-    ? configured
-    : join(homedir(), ".dsh");
+  const base =
+    configured !== undefined && configured !== ""
+      ? configured
+      : join(homedir(), ".dsh");
   return join(base, "pr-watch", "snapshot.json");
 }
 
@@ -911,7 +1008,10 @@ export async function loadSnapshot(path: string): Promise<LoadResult> {
     }
     return {
       snapshot: {
-        version: typeof parsed.version === "number" ? parsed.version : SNAPSHOT_VERSION,
+        version:
+          typeof parsed.version === "number"
+            ? parsed.version
+            : SNAPSHOT_VERSION,
         lastCheck: typeof parsed.lastCheck === "string" ? parsed.lastCheck : "",
         pullRequests: parsed.pullRequests,
       },
@@ -959,6 +1059,7 @@ git commit -m "feat: resolve snapshot path from DSH_HOME or ~/.dsh"
 ## Task 9: `loadSnapshot()` corruption recovery
 
 **Files:**
+
 - Modify: `tests/snapshot.test.ts` (append)
 
 - [ ] **Step 1: Append the failing tests**
@@ -976,7 +1077,9 @@ describe("loadSnapshot", () => {
   it("starts empty when no snapshot exists", async () => {
     const dir = tempDir();
     try {
-      const { snapshot, warning } = await loadSnapshot(join(dir, "snapshot.json"));
+      const { snapshot, warning } = await loadSnapshot(
+        join(dir, "snapshot.json"),
+      );
       expect(snapshot.pullRequests).toEqual({});
       expect(warning).toBeNull();
     } finally {
@@ -988,7 +1091,11 @@ describe("loadSnapshot", () => {
     const dir = tempDir();
     try {
       const path = join(dir, "snapshot.json");
-      const stored = { version: 1, lastCheck: "2026-09-01T00:00:00Z", pullRequests: { "o/r#1": record() } };
+      const stored = {
+        version: 1,
+        lastCheck: "2026-09-01T00:00:00Z",
+        pullRequests: { "o/r#1": record() },
+      };
       writeFileSync(path, JSON.stringify(stored));
       const { snapshot, warning } = await loadSnapshot(path);
       expect(snapshot).toEqual(stored);
@@ -1008,7 +1115,9 @@ describe("loadSnapshot", () => {
       expect(snapshot.pullRequests).toEqual({});
       expect(warning).toContain("was unreadable");
       expect(warning).toContain("snapshot.json.corrupt-1");
-      expect(readFileSync(`${path}.corrupt-1`, "utf8")).toBe("{ this is not json");
+      expect(readFileSync(`${path}.corrupt-1`, "utf8")).toBe(
+        "{ this is not json",
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1063,6 +1172,7 @@ git commit -m "test: cover snapshot corruption quarantine"
 ## Task 10: `saveSnapshot()` atomic write
 
 **Files:**
+
 - Modify: `src/snapshot.ts` (append)
 - Modify: `tests/snapshot.test.ts` (append)
 
@@ -1104,8 +1214,14 @@ describe("saveSnapshot", () => {
     const dir = tempDir();
     try {
       const path = join(dir, "snapshot.json");
-      await saveSnapshot(path, snapshot({ "o/r#1": record({ title: "First" }) }));
-      await saveSnapshot(path, snapshot({ "o/r#1": record({ title: "Second" }) }));
+      await saveSnapshot(
+        path,
+        snapshot({ "o/r#1": record({ title: "First" }) }),
+      );
+      await saveSnapshot(
+        path,
+        snapshot({ "o/r#1": record({ title: "Second" }) }),
+      );
 
       const written = JSON.parse(readFileSync(path, "utf8"));
       expect(written.pullRequests["o/r#1"].title).toBe("Second");
@@ -1131,7 +1247,10 @@ Expected: FAIL — `saveSnapshot` is not exported.
  * renamed over the target, so a crash mid-write can never leave a truncated
  * snapshot that reads as "every pull request vanished".
  */
-export async function saveSnapshot(path: string, data: Snapshot): Promise<void> {
+export async function saveSnapshot(
+  path: string,
+  data: Snapshot,
+): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const temporary = `${path}.tmp-${process.pid}`;
   await writeFile(temporary, `${JSON.stringify(data, null, 2)}\n`, "utf8");
@@ -1156,6 +1275,7 @@ git commit -m "feat: write snapshot atomically"
 ## Task 11: `gh-exec.ts` — pure mapping and argument builders
 
 **Files:**
+
 - Create: `src/gh-exec.ts`
 - Test: `tests/gh-exec.test.ts`
 
@@ -1234,17 +1354,24 @@ describe("record mapping", () => {
 
 describe("friendlyGhMessage", () => {
   it("recognises an authentication failure", () => {
-    expect(friendlyGhMessage("gh: To get started with GitHub CLI, run gh auth login", "boom"))
-      .toContain("gh auth login");
+    expect(
+      friendlyGhMessage(
+        "gh: To get started with GitHub CLI, run gh auth login",
+        "boom",
+      ),
+    ).toContain("gh auth login");
   });
 
   it("recognises a rate limit", () => {
-    expect(friendlyGhMessage("API rate limit exceeded for user ID 1.", "boom"))
-      .toContain("rate limit");
+    expect(
+      friendlyGhMessage("API rate limit exceeded for user ID 1.", "boom"),
+    ).toContain("rate limit");
   });
 
   it("falls back to the last lines of stderr", () => {
-    expect(friendlyGhMessage("line one\nline two", "boom")).toBe("line one\nline two");
+    expect(friendlyGhMessage("line one\nline two", "boom")).toBe(
+      "line one\nline two",
+    );
   });
 
   it("falls back to the provided message when stderr is empty", () => {
@@ -1316,7 +1443,12 @@ export async function ghExec(
 ): Promise<string> {
   try {
     const { stdout } = await execFileAsync("gh", args, {
-      env: { ...process.env, GH_PROMPT_DISABLED: "1", NO_COLOR: "1", ...options.env },
+      env: {
+        ...process.env,
+        GH_PROMPT_DISABLED: "1",
+        NO_COLOR: "1",
+        ...options.env,
+      },
       signal,
       maxBuffer: 10 * 1024 * 1024,
     });
@@ -1349,7 +1481,11 @@ export async function ghJson<T>(
   try {
     return JSON.parse(stdout) as T;
   } catch {
-    throw new GhError("GitHub CLI returned output that was not valid JSON.", null, stdout);
+    throw new GhError(
+      "GitHub CLI returned output that was not valid JSON.",
+      null,
+      stdout,
+    );
   }
 }
 
@@ -1391,8 +1527,14 @@ export interface RawPrDetail {
   mergedAt: string | null;
 }
 
-export function toPrKey(raw: { repository: { nameWithOwner: string }; number: number }): string {
-  return prKey({ nameWithOwner: raw.repository.nameWithOwner, number: raw.number });
+export function toPrKey(raw: {
+  repository: { nameWithOwner: string };
+  number: number;
+}): string {
+  return prKey({
+    nameWithOwner: raw.repository.nameWithOwner,
+    number: raw.number,
+  });
 }
 
 export function toPrRecord(raw: RawSearchPr): PrRecord {
@@ -1435,6 +1577,7 @@ and an unknown subcommand both resolve locally. GitHub-hosted runners ship `gh`
 preinstalled.
 
 **Files:**
+
 - Modify: `tests/gh-exec.test.ts` (append)
 
 - [ ] **Step 1: Append the failing tests**
@@ -1448,7 +1591,9 @@ describe("ghExec", () => {
   });
 
   it("reports a missing binary with install instructions", async () => {
-    await expect(ghExec(["--version"], undefined, { env: { PATH: "" } })).rejects.toMatchObject({
+    await expect(
+      ghExec(["--version"], undefined, { env: { PATH: "" } }),
+    ).rejects.toMatchObject({
       name: "GhError",
       message: expect.stringContaining("https://cli.github.com"),
     });
@@ -1468,7 +1613,9 @@ describe("ghExec", () => {
   it("rejects with AbortError, not GhError, when already aborted", async () => {
     const controller = new AbortController();
     controller.abort();
-    await expect(ghExec(["--version"], controller.signal)).rejects.toMatchObject({
+    await expect(
+      ghExec(["--version"], controller.signal),
+    ).rejects.toMatchObject({
       name: "AbortError",
     });
   });
@@ -1509,6 +1656,7 @@ git commit -m "test: cover gh process behaviour and error mapping"
 ## Task 13: Pure rendering
 
 **Files:**
+
 - Create: `src/tools/watch.ts` (render half)
 - Test: `tests/render.test.ts`
 
@@ -1539,7 +1687,9 @@ const merged = {
 
 describe("renderWatch", () => {
   it("says so when nothing changed", () => {
-    expect(renderWatch(value({ openCount: 3 }), false)).toContain("No changes since the last check");
+    expect(renderWatch(value({ openCount: 3 }), false)).toContain(
+      "No changes since the last check",
+    );
   });
 
   it("groups deltas under a labelled heading", () => {
@@ -1556,12 +1706,19 @@ describe("renderWatch", () => {
       { ...merged, kind: "merged" as const },
     ];
     const text = renderWatch(value({ deltas }), false);
-    expect(text.indexOf("Merged (1):")).toBeLessThan(text.indexOf("Became stale (1):"));
-    expect(text.indexOf("Became stale (1):")).toBeLessThan(text.indexOf("Newly noticed (1):"));
+    expect(text.indexOf("Merged (1):")).toBeLessThan(
+      text.indexOf("Became stale (1):"),
+    );
+    expect(text.indexOf("Became stale (1):")).toBeLessThan(
+      text.indexOf("Newly noticed (1):"),
+    );
   });
 
   it("surfaces the warning before anything else", () => {
-    const text = renderWatch(value({ warning: "Snapshot was unreadable." }), false);
+    const text = renderWatch(
+      value({ warning: "Snapshot was unreadable." }),
+      false,
+    );
     expect(text.indexOf("Snapshot was unreadable.")).toBe(0);
   });
 
@@ -1627,7 +1784,13 @@ const HEADINGS: Record<Delta["kind"], string> = {
 };
 
 /** Stable display order; most consequential first. */
-const ORDER: Delta["kind"][] = ["merged", "closed", "stale", "unresolved", "new"];
+const ORDER: Delta["kind"][] = [
+  "merged",
+  "closed",
+  "stale",
+  "unresolved",
+  "new",
+];
 
 const MS_PER_DAY = 86_400_000;
 
@@ -1642,7 +1805,12 @@ function relative(iso: string, nowIso: string): string {
   return `${days} days ago`;
 }
 
-function describe(key: string, title: string, updatedAt: string, nowIso: string): string {
+function describe(
+  key: string,
+  title: string,
+  updatedAt: string,
+  nowIso: string,
+): string {
   return `  ${key} — ${title} (last activity ${relative(updatedAt, nowIso)})`;
 }
 
@@ -1652,7 +1820,9 @@ export function renderWatch(value: WatchValue, all: boolean): string {
   if (value.warning !== null) lines.push(`⚠️  ${value.warning}`, "");
 
   if (all) {
-    lines.push(`Open pull requests (${value.openCount}), checked ${value.checkedAt}:`);
+    lines.push(
+      `Open pull requests (${value.openCount}), checked ${value.checkedAt}:`,
+    );
     if (value.open.length === 0) lines.push("  (none)");
     for (const pr of value.open) {
       lines.push(describe(pr.key, pr.title, pr.updatedAt, value.checkedAt));
@@ -1661,7 +1831,9 @@ export function renderWatch(value: WatchValue, all: boolean): string {
   }
 
   if (value.deltas.length === 0) {
-    lines.push(`No changes since the last check. ${value.openCount} open pull request(s) tracked.`);
+    lines.push(
+      `No changes since the last check. ${value.openCount} open pull request(s) tracked.`,
+    );
     return lines.join("\n");
   }
 
@@ -1670,7 +1842,9 @@ export function renderWatch(value: WatchValue, all: boolean): string {
     if (group.length === 0) continue;
     lines.push(`${HEADINGS[kind]} (${group.length}):`);
     for (const delta of group) {
-      lines.push(describe(delta.key, delta.title, delta.updatedAt, value.checkedAt));
+      lines.push(
+        describe(delta.key, delta.title, delta.updatedAt, value.checkedAt),
+      );
     }
     lines.push("");
   }
@@ -1695,6 +1869,7 @@ git commit -m "feat: render watch results as grouped text"
 ## Task 14: The `pr_watch` tool
 
 **Files:**
+
 - Modify: `src/tools/watch.ts` (append the tool)
 - Modify: `src/index.ts` (register)
 
@@ -1774,7 +1949,10 @@ export const prWatchTool = defineTool({
       additionalProperties: false,
     },
     render: (args, value) => [
-      { type: "text", text: renderWatch(value as WatchValue, args.all === true) },
+      {
+        type: "text",
+        text: renderWatch(value as WatchValue, args.all === true),
+      },
     ],
   },
   async execute(args, exec): Promise<WatchValue> {
@@ -1784,7 +1962,10 @@ export const prWatchTool = defineTool({
 
     // A failure here propagates before any write, so pending deltas survive to
     // the next successful run rather than being marked as seen.
-    const rawOpen = await ghJson<RawSearchPr[]>(ghSearchOpenArgs(), exec.signal);
+    const rawOpen = await ghJson<RawSearchPr[]>(
+      ghSearchOpenArgs(),
+      exec.signal,
+    );
     const open: Record<string, PrRecord> = {};
     for (const raw of rawOpen) open[toPrKey(raw)] = toPrRecord(raw);
 
@@ -1795,7 +1976,10 @@ export const prWatchTool = defineTool({
       if (entry.state !== "OPEN") continue;
       if (key in open) continue;
       try {
-        const detail = await ghJson<RawPrDetail>(ghViewArgs(entry.url), exec.signal);
+        const detail = await ghJson<RawPrDetail>(
+          ghViewArgs(entry.url),
+          exec.signal,
+        );
         const terminal = toTerminalState(detail.state);
         if (terminal !== undefined) resolved.set(key, terminal);
       } catch {
@@ -1805,7 +1989,9 @@ export const prWatchTool = defineTool({
     }
 
     const staleDays =
-      args.staleDays !== undefined && args.staleDays > 0 ? args.staleDays : DEFAULT_STALE_DAYS;
+      args.staleDays !== undefined && args.staleDays > 0
+        ? args.staleDays
+        : DEFAULT_STALE_DAYS;
     const { deltas, next } = diff(previous, open, resolved, now, { staleDays });
     await saveSnapshot(path, pruneTerminal(next, now, DEFAULT_PRUNE_DAYS));
 
@@ -1868,6 +2054,7 @@ git commit -m "feat: add pr_watch tool"
 ## Task 15: Build, lint, document, and push
 
 **Files:**
+
 - Create: `README.md`
 - Modify: any file flagged by lint or format
 
@@ -1916,24 +2103,25 @@ git push
 
 **Spec coverage:**
 
-| Spec section | Task |
-|---|---|
-| Architecture / file layout | 1 |
-| Data model | 2 |
-| Fetch strategy (two phases) | 14 |
-| Delta semantics — merged/closed | 4 |
-| Delta semantics — stale, once only | 5 |
-| Delta semantics — new / unresolved / silence | 6 |
-| Pruning (90 days) | 7 |
-| Snapshot location | 8 |
-| Corruption quarantine + warning | 9 |
-| Atomic write | 10 |
-| `gh` invocation, arg building, error mapping | 11, 12 |
-| Tool surface (`staleDays`, `all`) | 13, 14 |
-| Error handling — not installed / not authed / rate limit | 11, 12 |
-| Error handling — fetch failure writes nothing | 14 |
-| Error handling — unresolvable departure | 6, 14 |
-| Testing (no network) | all test tasks |
+| Spec section                                              | Task                                                    |
+| --------------------------------------------------------- | ------------------------------------------------------- |
+| Architecture / file layout                                | 1                                                       |
+| Data model                                                | 2                                                       |
+| Fetch strategy (two phases)                               | 14                                                      |
+| Delta semantics — merged/closed                           | 4                                                       |
+| Delta semantics — stale, once only                        | 5                                                       |
+| Delta semantics — new / unresolved / silence              | 6                                                       |
+| Pruning (90 days)                                         | 7                                                       |
+| Snapshot location                                         | 8                                                       |
+| Corruption quarantine + warning                           | 9                                                       |
+| Atomic write                                              | 10                                                      |
+| `gh` invocation, arg building, error mapping              | 11, 12                                                  |
+| Tool surface (`staleDays`, `all`)                         | 13, 14                                                  |
+| **Spec Configuration keys `ignoreRepos`, `snapshotPath`** | **Not implemented — deferred to v2. See refinement 3.** |
+| Error handling — not installed / not authed / rate limit  | 11, 12                                                  |
+| Error handling — fetch failure writes nothing             | 14                                                      |
+| Error handling — unresolvable departure                   | 6, 14                                                   |
+| Testing (no network)                                      | all test tasks                                          |
 
 **Placeholder scan:** no TBD/TODO. Every code step carries the full code.
 
