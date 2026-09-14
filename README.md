@@ -1,6 +1,6 @@
 # dsh-pr-watch
 
-![Status](https://img.shields.io/badge/status-pre--release-orange)
+![Status](https://img.shields.io/badge/status-implemented%2C%20unpublished-orange)
 ![License](https://img.shields.io/github/license/Shyboy0499/dsh-pr-watch)
 ![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-plugin-blue)
 
@@ -8,7 +8,7 @@
 
 `dsh-pr-watch` is a dependency-free [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) plugin that exposes one agent tool, **`pr_watch`**. It tracks every pull request you authored, **across all repositories — including ones you have never cloned** — and tells you only what changed since you last looked.
 
-> **Status: pre-release.** The design and implementation plan are complete; the implementation is in progress. **Nothing is published to npm yet, so the install command below does not work today.** It is included so the intended path is clear, not because it is ready.
+> **Status: implemented, not yet published.** The plugin is complete and its test suite passes, but **nothing is on npm yet, so the install command below does not work today.** It is included so the intended path is clear, not because it is ready.
 >
 > - Design: [`docs/superpowers/specs/2026-09-10-dsh-pr-watch-design.md`](docs/superpowers/specs/2026-09-10-dsh-pr-watch-design.md)
 > - Plan: [`docs/superpowers/plans/2026-09-10-dsh-pr-watch.md`](docs/superpowers/plans/2026-09-10-dsh-pr-watch.md)
