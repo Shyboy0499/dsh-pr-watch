@@ -15,29 +15,29 @@
 
 ## Why
 
-An agent has no memory of your last check, so every status question gets re-derived from scratch. That is fine for one pull request and useless for thirty. The friction is not *seeing* your pull requests — it is *re-checking* the same ones over and over and having to remember what the state was last time.
+An agent has no memory of your last check, so every status question gets re-derived from scratch. That is fine for one pull request and useless for thirty. The friction is not _seeing_ your pull requests — it is _re-checking_ the same ones over and over and having to remember what the state was last time.
 
 `pr_watch` closes that gap by storing a snapshot and reporting **deltas**.
 
 ## Features
 
-| Behaviour | Detail |
-| --- | --- |
-| **Merged** | A pull request you authored was merged |
-| **Closed without merge** | Distinguished from a merge, not lumped in with it |
-| **Became stale** | No activity for 14 days (configurable) |
-| **Newly noticed** | A pull request appeared that the snapshot did not know about |
-| **Uncloned repositories** | Tracked by `owner/repo#number`, so a local checkout is never required |
-| **Reported once, then silent** | Merges and staleness never repeat on later checks |
+| Behaviour                      | Detail                                                                |
+| ------------------------------ | --------------------------------------------------------------------- |
+| **Merged**                     | A pull request you authored was merged                                |
+| **Closed without merge**       | Distinguished from a merge, not lumped in with it                     |
+| **Became stale**               | No activity for 14 days (configurable)                                |
+| **Newly noticed**              | A pull request appeared that the snapshot did not know about          |
+| **Uncloned repositories**      | Tracked by `owner/repo#number`, so a local checkout is never required |
+| **Reported once, then silent** | Merges and staleness never repeat on later checks                     |
 
 ## How it works
 
-The naive approach — fetch open pull requests, diff against the snapshot — **cannot work**. The moment a pull request merges it *leaves* the open list, so a bare diff cannot tell "merged" from "closed unmerged", and an empty result looks identical to a failed `gh` call.
+The naive approach — fetch open pull requests, diff against the snapshot — **cannot work**. The moment a pull request merges it _leaves_ the open list, so a bare diff cannot tell "merged" from "closed unmerged", and an empty result looks identical to a failed `gh` call.
 
 So `pr_watch` fetches in two phases:
 
 1. **Enumerate** every open pull request you authored, in one call.
-2. **Resolve** each snapshot entry that *left* that set, individually, to learn its terminal state.
+2. **Resolve** each snapshot entry that _left_ that set, individually, to learn its terminal state.
 
 Only pull requests that actually changed incur a second call — normally zero or one per check.
 
@@ -86,18 +86,29 @@ Run it a second time and only genuine changes appear. A merge reported today is 
 
 ### Parameters
 
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `staleDays` | `number` | Days without activity before a pull request counts as stale. Defaults to `14`. |
-| `all` | `boolean` | List every open pull request instead of only what changed. Useful on first run, where everything is "newly noticed". Defaults to `false`. |
+| Parameter   | Type      | Description                                                                                                                               |
+| ----------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `staleDays` | `number`  | Days without activity before a pull request counts as stale. Defaults to `14`.                                                            |
+| `all`       | `boolean` | List every open pull request instead of only what changed. Useful on first run, where everything is "newly noticed". Defaults to `false`. |
 
 ### Configuration
 
-| Setting | Default | Purpose |
-| --- | --- | --- |
-| `staleDays` | `14` | Days without activity before a pull request is reported stale |
-| `pruneDays` | `90` | Drop entries that reached a terminal state this long ago |
-| Snapshot path | `$DSH_HOME/pr-watch/snapshot.json` | Falls back to `~/.dsh/pr-watch/snapshot.json` when `DSH_HOME` is unset |
+v1 exposes everything through the tool's two parameters above. It reads no
+settings file, so there is nothing else to configure yet.
+
+| Setting       | Default                            | Settable in v1                    | Purpose                                                                |
+| ------------- | ---------------------------------- | --------------------------------- | ---------------------------------------------------------------------- |
+| `staleDays`   | `14`                               | Yes — tool parameter              | Days without activity before a pull request is reported stale          |
+| `pruneDays`   | `90`                               | No — compile-time constant        | Drop entries that reached a terminal state this long ago               |
+| Snapshot path | `$DSH_HOME/pr-watch/snapshot.json` | No — derived from the environment | Falls back to `~/.dsh/pr-watch/snapshot.json` when `DSH_HOME` is unset |
+
+Two further keys appear in the [design doc](docs/superpowers/specs/2026-09-10-dsh-pr-watch-design.md) —
+`ignoreRepos` and a user-settable `snapshotPath` — but they are **deferred to v2
+and not implemented**. Honouring them needs a settings loader that does not exist
+yet, and `ignoreRepos` additionally needs a rule to evict ignored entries from
+the snapshot: an entry dropped from enumeration but kept in the snapshot would
+never resolve, so every check would report it as `unresolved` forever. See the
+plan's refinements section for the full reasoning.
 
 ## Behaviour notes
 
@@ -108,7 +119,7 @@ Run it a second time and only genuine changes appear. A merge reported today is 
 
 ## Known limitations
 
-**A pull request opened *and* merged between two checks is invisible.** It is absent from the open set (it already merged) and absent from the snapshot (it did not exist when the snapshot was taken), so neither phase sees it. This is a direct consequence of enumerating by current state rather than by activity window, and it only becomes likely if you check infrequently. The fix — an activity-window query — is recorded in the design doc as a v2 candidate.
+**A pull request opened _and_ merged between two checks is invisible.** It is absent from the open set (it already merged) and absent from the snapshot (it did not exist when the snapshot was taken), so neither phase sees it. This is a direct consequence of enumerating by current state rather than by activity window, and it only becomes likely if you check infrequently. The fix — an activity-window query — is recorded in the design doc as a v2 candidate.
 
 **New comments and reviews are not reported.** An outcome like "merged" is not the same as "a maintainer replied asking for changes", and the latter is often what should change your next action. It is deferred rather than overlooked: it needs a separate data source and a per-entry comment cursor.
 

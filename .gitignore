@@ -5,3 +5,9 @@ dist/
 .DS_Store
 .env
 .env.*
+
+# Local package-manager state. The DSH file sandbox blocks writes to the
+# machine-wide npm cache (EPERM), so installs are redirected inside the
+# workspace via .npmrc. Neither directory is ever committed or published.
+.npm-cache/
+.pnpm-store/
