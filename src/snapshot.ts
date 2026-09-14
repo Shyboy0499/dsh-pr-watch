@@ -8,7 +8,9 @@ export function snapshotPath(override?: string): string {
   if (override !== undefined && override.trim() !== "") return override;
   const configured = process.env.DSH_HOME?.trim();
   const base =
-    configured !== undefined && configured !== "" ? configured : join(homedir(), ".dsh");
+    configured !== undefined && configured !== ""
+      ? configured
+      : join(homedir(), ".dsh");
   return join(base, "pr-watch", "snapshot.json");
 }
 
@@ -48,7 +50,10 @@ export async function loadSnapshot(path: string): Promise<LoadResult> {
     }
     return {
       snapshot: {
-        version: typeof parsed.version === "number" ? parsed.version : SNAPSHOT_VERSION,
+        version:
+          typeof parsed.version === "number"
+            ? parsed.version
+            : SNAPSHOT_VERSION,
         lastCheck: typeof parsed.lastCheck === "string" ? parsed.lastCheck : "",
         pullRequests: parsed.pullRequests,
       },
@@ -83,7 +88,10 @@ async function quarantine(path: string): Promise<string> {
  * renamed over the target, so a crash mid-write can never leave a truncated
  * snapshot that reads as "every pull request vanished".
  */
-export async function saveSnapshot(path: string, data: Snapshot): Promise<void> {
+export async function saveSnapshot(
+  path: string,
+  data: Snapshot,
+): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const temporary = `${path}.tmp-${process.pid}`;
   await writeFile(temporary, `${JSON.stringify(data, null, 2)}\n`, "utf8");

@@ -1,5 +1,12 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadSnapshot, saveSnapshot, snapshotPath } from "../src/snapshot";
@@ -18,17 +25,23 @@ function tempDir(): string {
 describe("snapshotPath", () => {
   it("prefers DSH_HOME when set", () => {
     process.env.DSH_HOME = "/tmp/dsh-home";
-    expect(snapshotPath()).toBe(join("/tmp/dsh-home", "pr-watch", "snapshot.json"));
+    expect(snapshotPath()).toBe(
+      join("/tmp/dsh-home", "pr-watch", "snapshot.json"),
+    );
   });
 
   it("falls back to ~/.dsh when DSH_HOME is unset", () => {
     delete process.env.DSH_HOME;
-    expect(snapshotPath()).toBe(join(homedir(), ".dsh", "pr-watch", "snapshot.json"));
+    expect(snapshotPath()).toBe(
+      join(homedir(), ".dsh", "pr-watch", "snapshot.json"),
+    );
   });
 
   it("falls back to ~/.dsh when DSH_HOME is blank", () => {
     process.env.DSH_HOME = "   ";
-    expect(snapshotPath()).toBe(join(homedir(), ".dsh", "pr-watch", "snapshot.json"));
+    expect(snapshotPath()).toBe(
+      join(homedir(), ".dsh", "pr-watch", "snapshot.json"),
+    );
   });
 
   it("lets an explicit override win over the environment", () => {
@@ -41,7 +54,9 @@ describe("loadSnapshot", () => {
   it("starts empty when no snapshot exists", async () => {
     const dir = tempDir();
     try {
-      const { snapshot: loaded, warning } = await loadSnapshot(join(dir, "snapshot.json"));
+      const { snapshot: loaded, warning } = await loadSnapshot(
+        join(dir, "snapshot.json"),
+      );
       expect(loaded.pullRequests).toEqual({});
       expect(warning).toBeNull();
     } finally {
@@ -77,7 +92,9 @@ describe("loadSnapshot", () => {
       expect(loaded.pullRequests).toEqual({});
       expect(warning).toContain("was unreadable");
       expect(warning).toContain("snapshot.json.corrupt-1");
-      expect(readFileSync(`${path}.corrupt-1`, "utf8")).toBe("{ this is not json");
+      expect(readFileSync(`${path}.corrupt-1`, "utf8")).toBe(
+        "{ this is not json",
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -144,8 +161,14 @@ describe("saveSnapshot", () => {
     const dir = tempDir();
     try {
       const path = join(dir, "snapshot.json");
-      await saveSnapshot(path, snapshot({ "o/r#1": record({ title: "First" }) }));
-      await saveSnapshot(path, snapshot({ "o/r#1": record({ title: "Second" }) }));
+      await saveSnapshot(
+        path,
+        snapshot({ "o/r#1": record({ title: "First" }) }),
+      );
+      await saveSnapshot(
+        path,
+        snapshot({ "o/r#1": record({ title: "Second" }) }),
+      );
 
       const written = JSON.parse(readFileSync(path, "utf8"));
       expect(written.pullRequests["o/r#1"].title).toBe("Second");

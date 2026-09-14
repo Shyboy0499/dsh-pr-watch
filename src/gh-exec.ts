@@ -53,7 +53,12 @@ export async function ghExec(
 ): Promise<string> {
   try {
     const { stdout } = await execFileAsync("gh", args, {
-      env: { ...process.env, GH_PROMPT_DISABLED: "1", NO_COLOR: "1", ...options.env },
+      env: {
+        ...process.env,
+        GH_PROMPT_DISABLED: "1",
+        NO_COLOR: "1",
+        ...options.env,
+      },
       signal,
       maxBuffer: 10 * 1024 * 1024,
     });
@@ -86,7 +91,11 @@ export async function ghJson<T>(
   try {
     return JSON.parse(stdout) as T;
   } catch {
-    throw new GhError("GitHub CLI returned output that was not valid JSON.", null, stdout);
+    throw new GhError(
+      "GitHub CLI returned output that was not valid JSON.",
+      null,
+      stdout,
+    );
   }
 }
 
@@ -128,8 +137,14 @@ export interface RawPrDetail {
   mergedAt: string | null;
 }
 
-export function toPrKey(raw: { repository: { nameWithOwner: string }; number: number }): string {
-  return prKey({ nameWithOwner: raw.repository.nameWithOwner, number: raw.number });
+export function toPrKey(raw: {
+  repository: { nameWithOwner: string };
+  number: number;
+}): string {
+  return prKey({
+    nameWithOwner: raw.repository.nameWithOwner,
+    number: raw.number,
+  });
 }
 
 export function toPrRecord(raw: RawSearchPr): PrRecord {

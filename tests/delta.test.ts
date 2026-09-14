@@ -56,9 +56,16 @@ describe("diff — staleness", () => {
     const stale = record({ updatedAt: daysAgo(20) });
     const prev = snapshot({ "octo/repo#1": stale });
 
-    const { deltas, next } = diff(prev, { "octo/repo#1": stale }, new Map(), NOW);
+    const { deltas, next } = diff(
+      prev,
+      { "octo/repo#1": stale },
+      new Map(),
+      NOW,
+    );
 
-    expect(deltas).toEqual([{ ...toDeltaShape("stale"), updatedAt: stale.updatedAt }]);
+    expect(deltas).toEqual([
+      { ...toDeltaShape("stale"), updatedAt: stale.updatedAt },
+    ]);
     expect(next.pullRequests["octo/repo#1"].staleReported).toBe(true);
   });
 
@@ -84,29 +91,47 @@ describe("diff — staleness", () => {
     const fresh = record({ updatedAt: daysAgo(3) });
     const prev = snapshot({ "octo/repo#1": fresh });
 
-    const { deltas } = diff(prev, { "octo/repo#1": fresh }, new Map(), NOW, { staleDays: 2 });
+    const { deltas } = diff(prev, { "octo/repo#1": fresh }, new Map(), NOW, {
+      staleDays: 2,
+    });
 
     expect(deltas).toHaveLength(1);
     expect(deltas[0].kind).toBe("stale");
   });
 
   it("resets the stale flag when the pull request saw new activity", () => {
-    const previouslyStale = record({ updatedAt: daysAgo(20), staleReported: true });
+    const previouslyStale = record({
+      updatedAt: daysAgo(20),
+      staleReported: true,
+    });
     const nudge = record({ updatedAt: daysAgo(1) });
     const prev = snapshot({ "octo/repo#1": previouslyStale });
 
-    const { deltas, next } = diff(prev, { "octo/repo#1": nudge }, new Map(), NOW);
+    const { deltas, next } = diff(
+      prev,
+      { "octo/repo#1": nudge },
+      new Map(),
+      NOW,
+    );
 
     expect(deltas).toEqual([]);
     expect(next.pullRequests["octo/repo#1"].staleReported).toBe(false);
   });
 
   it("re-reports a nudged pull request that goes stale again", () => {
-    const previouslyStale = record({ updatedAt: daysAgo(40), staleReported: true });
+    const previouslyStale = record({
+      updatedAt: daysAgo(40),
+      staleReported: true,
+    });
     const nudge = record({ updatedAt: daysAgo(20) });
     const prev = snapshot({ "octo/repo#1": previouslyStale });
 
-    const { deltas, next } = diff(prev, { "octo/repo#1": nudge }, new Map(), NOW);
+    const { deltas, next } = diff(
+      prev,
+      { "octo/repo#1": nudge },
+      new Map(),
+      NOW,
+    );
 
     expect(deltas).toHaveLength(1);
     expect(deltas[0].kind).toBe("stale");
@@ -117,15 +142,27 @@ describe("diff — staleness", () => {
 describe("diff — new and unresolved", () => {
   it("reports a newly noticed pull request", () => {
     const fresh = record({ updatedAt: daysAgo(2) });
-    const { deltas, next } = diff(snapshot(), { "octo/repo#1": fresh }, new Map(), NOW);
+    const { deltas, next } = diff(
+      snapshot(),
+      { "octo/repo#1": fresh },
+      new Map(),
+      NOW,
+    );
 
-    expect(deltas).toEqual([{ ...toDeltaShape("new"), updatedAt: fresh.updatedAt }]);
+    expect(deltas).toEqual([
+      { ...toDeltaShape("new"), updatedAt: fresh.updatedAt },
+    ]);
     expect(next.pullRequests["octo/repo#1"].staleReported).toBe(false);
   });
 
   it("does not double-report a newly noticed pull request that is already stale", () => {
     const old = record({ updatedAt: daysAgo(30) });
-    const { deltas, next } = diff(snapshot(), { "octo/repo#1": old }, new Map(), NOW);
+    const { deltas, next } = diff(
+      snapshot(),
+      { "octo/repo#1": old },
+      new Map(),
+      NOW,
+    );
 
     expect(deltas.map((d) => d.kind)).toEqual(["new"]);
     expect(next.pullRequests["octo/repo#1"].staleReported).toBe(true);
@@ -144,7 +181,12 @@ describe("diff — new and unresolved", () => {
     const same = record({ updatedAt: daysAgo(2) });
     const prev = snapshot({ "octo/repo#1": same });
 
-    const { deltas, next } = diff(prev, { "octo/repo#1": same }, new Map(), NOW);
+    const { deltas, next } = diff(
+      prev,
+      { "octo/repo#1": same },
+      new Map(),
+      NOW,
+    );
 
     expect(deltas).toEqual([]);
     expect(next.pullRequests["octo/repo#1"]).toEqual(same);
@@ -162,7 +204,9 @@ describe("diff — new and unresolved", () => {
 
 describe("pruneTerminal", () => {
   it("drops a terminal entry older than the prune window", () => {
-    const input = snapshot({ "octo/repo#1": record({ state: "MERGED", updatedAt: daysAgo(120) }) });
+    const input = snapshot({
+      "octo/repo#1": record({ state: "MERGED", updatedAt: daysAgo(120) }),
+    });
 
     const result = pruneTerminal(input, NOW);
 
@@ -170,7 +214,9 @@ describe("pruneTerminal", () => {
   });
 
   it("keeps a recent terminal entry", () => {
-    const input = snapshot({ "octo/repo#1": record({ state: "MERGED", updatedAt: daysAgo(10) }) });
+    const input = snapshot({
+      "octo/repo#1": record({ state: "MERGED", updatedAt: daysAgo(10) }),
+    });
 
     const result = pruneTerminal(input, NOW);
 
@@ -178,7 +224,9 @@ describe("pruneTerminal", () => {
   });
 
   it("never prunes an open entry however old", () => {
-    const input = snapshot({ "octo/repo#1": record({ state: "OPEN", updatedAt: daysAgo(500) }) });
+    const input = snapshot({
+      "octo/repo#1": record({ state: "OPEN", updatedAt: daysAgo(500) }),
+    });
 
     const result = pruneTerminal(input, NOW);
 
@@ -186,7 +234,9 @@ describe("pruneTerminal", () => {
   });
 
   it("honours a pruneDays override", () => {
-    const input = snapshot({ "octo/repo#1": record({ state: "CLOSED", updatedAt: daysAgo(10) }) });
+    const input = snapshot({
+      "octo/repo#1": record({ state: "CLOSED", updatedAt: daysAgo(10) }),
+    });
 
     expect(pruneTerminal(input, NOW, 5).pullRequests).toEqual({});
   });

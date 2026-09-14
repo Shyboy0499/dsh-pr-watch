@@ -74,18 +74,23 @@ describe("record mapping", () => {
 describe("friendlyGhMessage", () => {
   it("recognises an authentication failure", () => {
     expect(
-      friendlyGhMessage("gh: To get started with GitHub CLI, run gh auth login", "boom"),
+      friendlyGhMessage(
+        "gh: To get started with GitHub CLI, run gh auth login",
+        "boom",
+      ),
     ).toContain("gh auth login");
   });
 
   it("recognises a rate limit", () => {
-    expect(friendlyGhMessage("API rate limit exceeded for user ID 1.", "boom")).toContain(
-      "rate limit",
-    );
+    expect(
+      friendlyGhMessage("API rate limit exceeded for user ID 1.", "boom"),
+    ).toContain("rate limit");
   });
 
   it("falls back to the last lines of stderr", () => {
-    expect(friendlyGhMessage("line one\nline two", "boom")).toBe("line one\nline two");
+    expect(friendlyGhMessage("line one\nline two", "boom")).toBe(
+      "line one\nline two",
+    );
   });
 
   it("falls back to the provided message when stderr is empty", () => {
@@ -101,7 +106,9 @@ describe("ghExec", () => {
   });
 
   it("reports a missing binary with install instructions", async () => {
-    await expect(ghExec(["--version"], undefined, { env: { PATH: "" } })).rejects.toMatchObject({
+    await expect(
+      ghExec(["--version"], undefined, { env: { PATH: "" } }),
+    ).rejects.toMatchObject({
       name: "GhError",
       message: expect.stringContaining("https://cli.github.com"),
     });
@@ -121,7 +128,9 @@ describe("ghExec", () => {
   it("rejects with AbortError, not GhError, when already aborted", async () => {
     const controller = new AbortController();
     controller.abort();
-    await expect(ghExec(["--version"], controller.signal)).rejects.toMatchObject({
+    await expect(
+      ghExec(["--version"], controller.signal),
+    ).rejects.toMatchObject({
       name: "AbortError",
     });
   });

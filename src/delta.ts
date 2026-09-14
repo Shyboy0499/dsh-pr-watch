@@ -89,7 +89,9 @@ export function diff(
       next[key] = previous;
       continue;
     }
-    deltas.push(toDelta(terminal === "MERGED" ? "merged" : "closed", key, previous));
+    deltas.push(
+      toDelta(terminal === "MERGED" ? "merged" : "closed", key, previous),
+    );
     next[key] = { ...previous, state: terminal };
   }
 
@@ -97,12 +99,19 @@ export function diff(
     deltas.push(toDelta("new", key, fresh));
     // A first sighting already past the threshold is surfaced as `new`, not
     // double-reported as stale — but the flag is set so it never fires later.
-    next[key] = { ...fresh, staleReported: ageInDays(fresh.updatedAt, now) >= staleDays };
+    next[key] = {
+      ...fresh,
+      staleReported: ageInDays(fresh.updatedAt, now) >= staleDays,
+    };
   }
 
   return {
     deltas,
-    next: { version: SNAPSHOT_VERSION, lastCheck: now.toISOString(), pullRequests: next },
+    next: {
+      version: SNAPSHOT_VERSION,
+      lastCheck: now.toISOString(),
+      pullRequests: next,
+    },
   };
 }
 
@@ -120,7 +129,8 @@ export function pruneTerminal(
 ): Snapshot {
   const kept: Record<string, PrRecord> = {};
   for (const [key, item] of Object.entries(snapshot.pullRequests)) {
-    if (item.state !== "OPEN" && ageInDays(item.updatedAt, now) > pruneDays) continue;
+    if (item.state !== "OPEN" && ageInDays(item.updatedAt, now) > pruneDays)
+      continue;
     kept[key] = item;
   }
   return { ...snapshot, pullRequests: kept };
