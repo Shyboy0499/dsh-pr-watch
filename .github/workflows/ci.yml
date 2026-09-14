@@ -10,21 +10,56 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # This repository is public before it is a project: the design docs landed
+      # first, and the scaffolding PR is what introduces package.json. Running the
+      # toolchain on a ref that has no manifest fails for the wrong reason —
+      # `cache: pnpm` in setup-node hard-requires a lockfile and aborts the job.
+      #
+      # The job still runs and still reports success on such a ref, rather than
+      # being skipped at the job level: a skipped job produces no check run, which
+      # would leave a required status check permanently "expected" and block merges.
+      - name: Detect project
+        id: project
+        run: |
+          if [ -f package.json ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No package.json on this ref — skipping the toolchain."
+          fi
+
       - uses: pnpm/action-setup@v4
+        if: steps.project.outputs.present == 'true'
         with:
           version: 10
+
       - uses: actions/setup-node@v4
+        if: steps.project.outputs.present == 'true'
         with:
           node-version: 22
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+
+      - name: Install
+        if: steps.project.outputs.present == 'true'
+        run: pnpm install --frozen-lockfile
+
       - name: Typecheck
+        if: steps.project.outputs.present == 'true'
         run: pnpm run typecheck
+
       - name: Lint
+        if: steps.project.outputs.present == 'true'
         run: pnpm run lint
+
       - name: Format check
+        if: steps.project.outputs.present == 'true'
         run: pnpm run format:check
+
       - name: Test
+        if: steps.project.outputs.present == 'true'
         run: pnpm test
+
       - name: Build
+        if: steps.project.outputs.present == 'true'
         run: pnpm run build
