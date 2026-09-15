@@ -1,7 +1,7 @@
 {
   "name": "dsh-pr-watch",
   "version": "0.1.0",
-  "description": "DeepSeek Harness plugin: reports what changed in your authored pull requests since your last check — merged, closed, or gone stale.",
+  "description": "DeepSeek Harness plugin (in development): reports what changed in your authored pull requests since your last check — merged, closed, or gone stale.",
   "license": "MIT",
   "author": "Shyboy0499",
   "repository": {

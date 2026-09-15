@@ -1,6 +1,6 @@
 # dsh-pr-watch
 
-![Status](https://img.shields.io/badge/status-pre--release-orange)
+![Status](https://img.shields.io/badge/status-scaffolding%20only-orange)
 ![License](https://img.shields.io/github/license/Shyboy0499/dsh-pr-watch)
 ![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-plugin-blue)
 
@@ -8,10 +8,26 @@
 
 `dsh-pr-watch` is a dependency-free [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) plugin that exposes one agent tool, **`pr_watch`**. It tracks every pull request you authored, **across all repositories — including ones you have never cloned** — and tells you only what changed since you last looked.
 
-> **Status: pre-release.** The design and implementation plan are complete; the implementation is in progress. **Nothing is published to npm yet, so the install command below does not work today.** It is included so the intended path is clear, not because it is ready.
+> **Status: scaffolding only.** The plugin skeleton, its types, and their tests are in place and CI is green. **The `pr_watch` tool itself is not implemented yet** — everything below describes the behaviour it is being built to, not behaviour you can use today. Nothing is published to npm, so the install command does not work either.
 >
 > - Design: [`docs/superpowers/specs/2026-09-10-dsh-pr-watch-design.md`](docs/superpowers/specs/2026-09-10-dsh-pr-watch-design.md)
 > - Plan: [`docs/superpowers/plans/2026-09-10-dsh-pr-watch.md`](docs/superpowers/plans/2026-09-10-dsh-pr-watch.md)
+> - What is left: [Roadmap](#roadmap)
+
+## What works today
+
+| Piece                                                       | State                                 |
+| ----------------------------------------------------------- | ------------------------------------- |
+| `package.json`, `tsconfig.json`, `tsdown.config.ts`, bundle | ✅ In place                           |
+| `src/types.ts` — `PrRecord`, `Snapshot`, `Delta`, constants | ✅ In place                           |
+| `src/index.ts` — plugin entry (`name`, `inject`, `apply`)   | ✅ In place, registers **zero** tools |
+| CI — typecheck, lint, format, test, build                   | ✅ Green on every pull request        |
+| `src/delta.ts` — the pure diff core                         | ⛔ Not implemented                    |
+| `src/snapshot.ts` — load, quarantine, atomic save           | ⛔ Not implemented                    |
+| `src/gh-exec.ts` — `gh` invocation and mapping              | ⛔ Not implemented                    |
+| `src/tools/watch.ts` — the `pr_watch` tool                  | ⛔ Not implemented                    |
+
+Thirteen tests pass. The entry point is real and tested, but its tool list is empty, so **installing this plugin today registers nothing.**
 
 ## Why
 
@@ -20,6 +36,8 @@ An agent has no memory of your last check, so every status question gets re-deri
 `pr_watch` closes that gap by storing a snapshot and reporting **deltas**.
 
 ## Features
+
+> ⚠️ **Designed, not built.** Everything from here down to [Known limitations](#known-limitations) describes the intended behaviour. None of it is implemented yet — see [What works today](#what-works-today) for the honest state.
 
 | Behaviour                      | Detail                                                                |
 | ------------------------------ | --------------------------------------------------------------------- |
@@ -126,6 +144,20 @@ plan's refinements section for the full reasoning.
 **CI status is not reported.**
 
 **One snapshot per GitHub identity.** Running under a second account would share a snapshot and produce spurious "newly noticed" entries.
+
+## Roadmap
+
+The design is complete and the work is broken into fifteen tasks in the
+[implementation plan](docs/superpowers/plans/2026-09-10-dsh-pr-watch.md).
+
+| State | Tasks                                                                |
+| ----- | -------------------------------------------------------------------- |
+| ✅    | 1–3 — scaffolding, types, test fixtures                              |
+| ⛔    | 4–7 — the pure `delta.ts` core                                       |
+| ⛔    | 8–10 — `snapshot.ts`: path resolution, load, quarantine, atomic save |
+| ⛔    | 11–12 — `gh-exec.ts`: invocation, record mapping, error handling     |
+| ⛔    | 13–14 — `renderWatch()` and the `pr_watch` tool, then registration   |
+| ⛔    | 15 — build wiring, README, publish preparation                       |
 
 ## Development
 
