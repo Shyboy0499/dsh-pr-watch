@@ -435,6 +435,293 @@ describe("diff — clock anomalies", () => {
   });
 });
 
+describe("diff — terminal outcomes", () => {
+  it("reports a merge once and is silent on the next check", () => {
+    // "Merges never repeat." The state itself is the record that the outcome
+    // was reported, so the second pass has nothing left to say.
+    const prev = snapshot({ "octo/repo#1": record({ state: "OPEN" }) });
+    const resolved = new Map([["octo/repo#1", "MERGED" as const]]);
+
+    const first = diff(prev, {}, resolved, NOW);
+    const second = diff(first.next, {}, new Map(), NOW);
+
+    expect(first.deltas.map((delta) => delta.kind)).toEqual(["merged"]);
+    expect(second.deltas).toEqual([]);
+  });
+
+  it("reports a close without merge once and is silent on the next check", () => {
+    const prev = snapshot({ "octo/repo#1": record({ state: "OPEN" }) });
+    const resolved = new Map([["octo/repo#1", "CLOSED" as const]]);
+
+    const first = diff(prev, {}, resolved, NOW);
+    const second = diff(first.next, {}, new Map(), NOW);
+
+    expect(first.deltas.map((delta) => delta.kind)).toEqual(["closed"]);
+    expect(second.deltas).toEqual([]);
+  });
+
+  it("keeps merged and closed in separate buckets", () => {
+    const prev = snapshot({
+      "octo/repo#1": record(),
+      "other/repo#2": record({
+        url: "https://github.com/other/repo/pull/2",
+        title: "Second",
+      }),
+    });
+    const resolved = new Map([
+      ["octo/repo#1", "MERGED" as const],
+      ["other/repo#2", "CLOSED" as const],
+    ]);
+
+    const { deltas } = diff(prev, {}, resolved, NOW);
+
+    expect(deltas.filter((delta) => delta.kind === "merged")).toHaveLength(1);
+    expect(deltas.filter((delta) => delta.kind === "closed")).toHaveLength(1);
+    expect(deltas.find((delta) => delta.kind === "merged")?.key).toBe(
+      "octo/repo#1",
+    );
+  });
+
+  it("reports every entry that reaches a terminal state in the same batch", () => {
+    const prev = snapshot({
+      "octo/repo#1": record(),
+      "other/repo#2": record({
+        url: "https://github.com/other/repo/pull/2",
+        title: "Second",
+      }),
+      "third/repo#3": record({
+        url: "https://github.com/third/repo/pull/3",
+        title: "Third",
+        // Already reported as gone, so this pass has only the two outcomes to
+        // announce. Without it the third would also emit `unresolved`.
+        departedReported: true,
+      }),
+    });
+    const resolved = new Map([
+      ["octo/repo#1", "MERGED" as const],
+      ["other/repo#2", "CLOSED" as const],
+    ]);
+
+    const { deltas, next } = diff(prev, {}, resolved, NOW);
+
+    expect(deltas.map((delta) => delta.kind)).toEqual(["merged", "closed"]);
+    expect(next.pullRequests["third/repo#3"].state).toBe("OPEN");
+  });
+
+  it("reports the terminal outcome rather than staleness when both apply", () => {
+    // The entry is far past the stale threshold and has just been resolved. The
+    // terminal state wins: precedence 1 and 2 both sit above staleness, and
+    // calling a finished pull request "quiet" would be a competing claim.
+    const quiet = record({ updatedAt: daysAgo(90) });
+    const prev = snapshot({ "octo/repo#1": quiet });
+    const resolved = new Map([["octo/repo#1", "MERGED" as const]]);
+
+    const { deltas } = diff(prev, {}, resolved, NOW);
+
+    expect(deltas.map((delta) => delta.kind)).toEqual(["merged"]);
+  });
+});
+
+describe("diff — unresolvable departures", () => {
+  it("reports an unresolved departure once, then stays silent", () => {
+    const prev = snapshot({ "octo/repo#1": record({ state: "OPEN" }) });
+
+    const first = diff(prev, {}, new Map(), NOW);
+    const second = diff(first.next, {}, new Map(), NOW);
+
+    expect(first.deltas.map((delta) => delta.kind)).toEqual(["unresolved"]);
+    expect(second.deltas).toEqual([]);
+    expect(second.next.pullRequests["octo/repo#1"].departedReported).toBe(true);
+  });
+
+  it("keeps an unresolved entry OPEN so the next check retries it", () => {
+    const prev = snapshot({ "octo/repo#1": record({ state: "OPEN" }) });
+
+    const { next } = diff(prev, {}, new Map(), NOW);
+
+    expect(next.pullRequests["octo/repo#1"].state).toBe("OPEN");
+  });
+
+  it("reports once for each unresolvable departure in a batch", () => {
+    const prev = snapshot({
+      "octo/repo#1": record(),
+      "other/repo#2": record({
+        url: "https://github.com/other/repo/pull/2",
+        title: "Second",
+      }),
+    });
+
+    const first = diff(prev, {}, new Map(), NOW);
+    const second = diff(first.next, {}, new Map(), NOW);
+
+    expect(first.deltas.map((delta) => delta.kind)).toEqual([
+      "unresolved",
+      "unresolved",
+    ]);
+    expect(second.deltas).toEqual([]);
+  });
+
+  it("stays silent for a departure already reported as unresolved", () => {
+    const prev = snapshot({
+      "octo/repo#1": record({ state: "OPEN", departedReported: true }),
+    });
+
+    const { deltas } = diff(prev, {}, new Map(), NOW);
+
+    expect(deltas).toEqual([]);
+  });
+
+  it("never reports unresolved as merged or closed", () => {
+    // An empty result and a failed lookup are indistinguishable from here, so
+    // inferring an outcome would invent a merge that never happened.
+    const prev = snapshot({ "octo/repo#1": record({ state: "OPEN" }) });
+
+    const { deltas } = diff(prev, {}, new Map(), NOW);
+
+    expect(deltas.some((delta) => delta.kind === "merged")).toBe(false);
+    expect(deltas.some((delta) => delta.kind === "closed")).toBe(false);
+  });
+
+  it("reports the outcome when a previously unresolvable entry resolves", () => {
+    const prev = snapshot({
+      "octo/repo#1": record({ state: "OPEN", departedReported: true }),
+    });
+    const resolved = new Map([["octo/repo#1", "MERGED" as const]]);
+
+    const { deltas, next } = diff(prev, {}, resolved, NOW);
+
+    expect(deltas.map((delta) => delta.kind)).toEqual(["merged"]);
+    // The departure flag is spent: the terminal state is now the record.
+    expect(next.pullRequests["octo/repo#1"].departedReported).toBe(false);
+  });
+});
+
+describe("diff and pruneTerminal — the full lifecycle", () => {
+  it("walks unresolved, merged, silence, then pruning", () => {
+    const open = record({ updatedAt: daysAgo(5) });
+
+    // Check 1: it has left the open set and cannot be resolved yet.
+    const first = diff(snapshot({ "octo/repo#1": open }), {}, new Map(), NOW);
+    expect(first.deltas.map((delta) => delta.kind)).toEqual(["unresolved"]);
+    expect(first.next.pullRequests["octo/repo#1"].state).toBe("OPEN");
+
+    // Check 2: still unresolvable, and now silent.
+    const second = diff(first.next, {}, new Map(), NOW);
+    expect(second.deltas).toEqual([]);
+
+    // Check 3: the resolve phase answers -- merged. `updatedAt` moves to the
+    // moment it landed, which is how terminal time is measured.
+    const landed = record({
+      state: "OPEN",
+      updatedAt: NOW.toISOString(),
+      departedReported: true,
+    });
+    const third = diff(
+      snapshot({ "octo/repo#1": landed }),
+      {},
+      new Map([["octo/repo#1", "MERGED" as const]]),
+      NOW,
+    );
+    expect(third.deltas.map((delta) => delta.kind)).toEqual(["merged"]);
+    expect(third.next.pullRequests["octo/repo#1"].state).toBe("MERGED");
+
+    // Check 4: reported once, now silent.
+    const fourth = diff(third.next, {}, new Map(), NOW);
+    expect(fourth.deltas).toEqual([]);
+
+    // Well inside the prune window: kept, and still silent.
+    const inside = new Date(NOW.getTime() + 30 * 86_400_000);
+    expect(
+      Object.keys(pruneTerminal(fourth.next, inside).pullRequests),
+    ).toEqual(["octo/repo#1"]);
+    expect(diff(fourth.next, {}, new Map(), inside).deltas).toEqual([]);
+
+    // Past the window: the entry finally leaves the snapshot.
+    const outside = new Date(NOW.getTime() + 91 * 86_400_000);
+    expect(pruneTerminal(fourth.next, outside).pullRequests).toEqual({});
+  });
+});
+
+describe("pruneTerminal — the retention boundary", () => {
+  /** A terminal entry whose last activity was exactly `days` ago. */
+  function mergedDaysAgo(days: number) {
+    return snapshot({
+      "octo/repo#1": record({
+        state: "MERGED",
+        updatedAt: new Date(NOW.getTime() - days * 86_400_000).toISOString(),
+      }),
+    });
+  }
+
+  // The comparison is exclusive: exactly `pruneDays` old is still kept, and
+  // only the next day drops it. Staleness chose inclusive because it decides
+  // whether a user is told something; pruning decides whether a decision is
+  // forgotten, so the safe side of the boundary is the one that keeps data.
+  it("keeps an entry exactly pruneDays old", () => {
+    expect(
+      Object.keys(pruneTerminal(mergedDaysAgo(90), NOW).pullRequests),
+    ).toEqual(["octo/repo#1"]);
+  });
+
+  it("drops an entry one day past pruneDays", () => {
+    expect(pruneTerminal(mergedDaysAgo(91), NOW).pullRequests).toEqual({});
+  });
+
+  it("honours an explicit pruneDays of zero as exclusive", () => {
+    // Aged by a day: dropped. Age zero would be kept, which is why the boundary
+    // is worth pinning rather than assuming.
+    expect(pruneTerminal(mergedDaysAgo(1), NOW, 0).pullRequests).toEqual({});
+    expect(
+      Object.keys(pruneTerminal(mergedDaysAgo(0), NOW, 0).pullRequests),
+    ).toEqual(["octo/repo#1"]);
+  });
+
+  it("keeps everything under an enormous window", () => {
+    const input = mergedDaysAgo(5000);
+
+    expect(
+      Object.keys(
+        pruneTerminal(input, NOW, Number.MAX_SAFE_INTEGER).pullRequests,
+      ),
+    ).toEqual(["octo/repo#1"]);
+  });
+
+  it("never prunes on a future timestamp", () => {
+    // A backwards clock would otherwise make every terminal entry look ancient
+    // and wipe the snapshot's history in one pass.
+    const future = snapshot({
+      "octo/repo#1": record({
+        state: "MERGED",
+        updatedAt: new Date(NOW.getTime() + 10 * 86_400_000).toISOString(),
+      }),
+    });
+
+    expect(Object.keys(pruneTerminal(future, NOW).pullRequests)).toEqual([
+      "octo/repo#1",
+    ]);
+  });
+
+  it("never prunes an unresolved entry however long it has been gone", () => {
+    // It stays OPEN, and an open entry is never pruned. Dropping it would
+    // destroy a pending change that was never reported.
+    const input = snapshot({
+      "octo/repo#1": record({
+        state: "OPEN",
+        updatedAt: daysAgo(5000),
+        departedReported: true,
+      }),
+    });
+
+    expect(Object.keys(pruneTerminal(input, NOW).pullRequests)).toEqual([
+      "octo/repo#1",
+    ]);
+  });
+
+  it("reports no prune set for an empty snapshot", () => {
+    expect(pruneTerminal(snapshot(), NOW).pullRequests).toEqual({});
+  });
+});
+
 describe("diff — the reported check time", () => {
   it("records the injected clock on the next snapshot", () => {
     const { next } = diff(snapshot(), {}, new Map(), NOW);

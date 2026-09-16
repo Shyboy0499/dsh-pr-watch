@@ -13,6 +13,17 @@ export interface PrRecord {
   updatedAt: string;
   /** True once staleness has been reported, so it is never reported twice. */
   staleReported: boolean;
+  /**
+   * True once a departure has been reported, so it is never reported twice.
+   *
+   * A pull request that left the open set cannot be told apart from one that
+   * left on an earlier check by its `state` alone: it stays `OPEN` on purpose,
+   * so the resolve phase retries it. This flag is what makes the departure
+   * reportable once and then silent, the same way `staleReported` does for
+   * staleness. It is cleared whenever the entry is resolvable again, because
+   * reaching a terminal state is a different report entirely.
+   */
+  departedReported: boolean;
 }
 
 /** The on-disk snapshot. */

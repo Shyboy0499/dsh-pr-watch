@@ -20,6 +20,7 @@ export function record(overrides: Partial<PrRecord> = {}): PrRecord {
     createdAt: daysAgo(30),
     updatedAt: daysAgo(1),
     staleReported: false,
+    departedReported: false,
     ...overrides,
   };
 }

@@ -82,32 +82,42 @@ function toDelta(kind: Delta["kind"], key: string, source: PrRecord): Delta {
  * Classification precedence, highest first:
  *
  * 1. `prev` state is already terminal -> carried forward verbatim. Never
- *    reported, never re-evaluated.
+ *    reported, never re-evaluated, and never pruned by this function (see
+ *    `pruneTerminal`). The state IS the record that the outcome was reported,
+ *    which is why a merge or a close never repeats.
  * 2. Present in `prev`, absent from `open` -> `MERGED`/`CLOSED` when `resolved`
- *    supplies a terminal state, otherwise `unresolved`, and the entry stays
- *    `OPEN` so the next check retries it.
+ *    supplies a terminal state, otherwise `unresolved`. Either way the entry is
+ *    kept: a terminal one carries its outcome, an unresolved one stays `OPEN`
+ *    so the next check retries it.
  * 3. Present in `open` but absent from `prev` -> `new`. This outranks staleness:
  *    an entry is announced once, and if it is already past the threshold the
  *    next snapshot records that so the following check stays quiet.
  * 4. Present in both -> `stale` on the first crossing of `staleDays`, then
  *    silence until new activity resets the flag.
  *
- * Staleness is a transition, not a state, which is what makes `staleReported`
- * necessary: testing only "is it currently past the threshold" would re-report
- * the same pull request on every single check. The distinction the snapshot must
- * carry is therefore "crossed and already reported" versus "just crossed".
+ * Both silences are transitions, not states, so the snapshot has to carry the
+ * distinction between "already reported" and "not yet reported". `staleReported`
+ * does that for staleness and `departedReported` for an unresolvable departure:
+ * testing only "is it currently past the threshold", or only "is it currently
+ * gone from the open set", would re-report the same pull request on every single
+ * check. A terminal state needs no flag of its own -- `state` already says the
+ * outcome was recorded.
  *
- * The flag travels with the value this function returns, not with any store it
- * touches. `diff` never writes anything: it records the flag it believes should
- * be persisted on the `next` record, and deciding to save that snapshot is the
- * caller's business. That keeps the module pure and makes every transition above
- * a fixture-driven test rather than an assertion about disk.
+ * Those flags travel with the value this function returns, not with any store it
+ * touches. `diff` never writes anything: it records on the `next` record the
+ * flags it believes should be persisted, and deciding to save that snapshot is
+ * the caller's business. That keeps the module pure and makes every transition
+ * above a fixture-driven test rather than an assertion about disk.
  *
- * The flag is set when a `stale` delta is emitted, and also when an entry is
- * first announced as `new` while already past the threshold -- otherwise the
- * following check would immediately announce the same entry again as stale.
- * It is cleared when an entry's `updatedAt` moves, since activity restarts the
- * clock; a cleared flag lets a later crossing be reported again.
+ * `staleReported` is set when a `stale` delta is emitted, and also when an entry
+ * is first announced as `new` while already past the threshold -- otherwise the
+ * following check would immediately announce the same entry again as stale. It is
+ * cleared when an entry's `updatedAt` moves, since activity restarts the clock;
+ * a cleared flag lets a later crossing be reported again.
+ *
+ * `departedReported` is set when an `unresolved` delta is emitted, and cleared
+ * the moment the entry resolves, because reaching a terminal state is a
+ * different report entirely.
  */
 export function diff(
   prev: Snapshot,
@@ -136,15 +146,29 @@ export function diff(
     // 2/3. Absent from the open set.
     if (fresh === undefined) {
       const terminal = resolved.get(key);
+
       if (terminal === undefined) {
-        deltas.push(toDelta("unresolved", key, previous));
-        next[key] = previous; // stays OPEN: the next check retries it
+        // The resolve phase could not determine an outcome. That is not the
+        // same as "it merged": an empty result and a failed lookup are
+        // indistinguishable from here, so nothing may be inferred. The entry
+        // stays OPEN and keeps its place so the next check retries it.
+        //
+        // Reported once, then silent -- otherwise a pull request that can never
+        // be resolved would reappear in every report forever, which is exactly
+        // the noise this plugin exists to remove.
+        if (!previous.departedReported) {
+          deltas.push(toDelta("unresolved", key, previous));
+        }
+        next[key] = { ...previous, departedReported: true };
         continue;
       }
+
+      // Resolved: the state itself is the record, so the departure flag is
+      // spent and is cleared. This is what lets the entry go quiet for good.
       deltas.push(
         toDelta(terminal === "MERGED" ? "merged" : "closed", key, previous),
       );
-      next[key] = { ...previous, state: terminal };
+      next[key] = { ...previous, state: terminal, departedReported: false };
       continue;
     }
 
@@ -194,11 +218,29 @@ export function diff(
 /**
  * Drop terminal entries whose last activity is older than `pruneDays`.
  *
- * GitHub advances `updatedAt` when a pull request merges or closes, so this is
- * effectively "terminal for more than `pruneDays`". Open entries are never
- * pruned regardless of age -- going quiet is not the same as being finished.
+ * Terminal time is read from `PrRecord.updatedAt`, which GitHub advances when a
+ * pull request merges or closes. The record carries no dedicated merge or close
+ * timestamp, and adding one would change the snapshot schema, so `updatedAt` is
+ * the deliberate proxy. Its one weakness is that a later edit to an already
+ * terminal pull request pushes the moment forward and delays pruning; that is
+ * accepted, because the cost is a stale entry lingering rather than a reported
+ * outcome being lost.
  *
- * This is a pure decision only. Nothing here removes anything from disk.
+ * The comparison is EXCLUSIVE: an entry exactly `pruneDays` old is kept, and
+ * only the next day drops it. This is the opposite choice from staleness, which
+ * is inclusive, and deliberately so. Staleness decides whether a user is told
+ * something, so landing on the wrong side of a millisecond would change what
+ * they see. Pruning decides whether a decision is forgotten, so the safe end of
+ * the boundary is the one that keeps data, and "this long ago" reads most
+ * naturally as "more than this long ago".
+ *
+ * Open entries are never pruned regardless of age -- going quiet is not the same
+ * as being finished -- and neither are unresolved ones, which stay `OPEN` by
+ * design. Dropping an unresolved entry would silently destroy a pending change
+ * that was never reported.
+ *
+ * This is a pure decision only. Nothing here removes anything from disk; the
+ * keys missing from the returned snapshot are the "to prune" set.
  *
  * An entry whose `updatedAt` cannot be parsed is kept: its age is unknown, so
  * it cannot be shown to be past the window, and dropping it would discard a
