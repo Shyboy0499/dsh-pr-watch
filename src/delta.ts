@@ -15,10 +15,63 @@ export interface DiffOptions {
 }
 
 export interface DiffResult {
-  /** Everything worth telling the user about, in classification order. */
+  /**
+   * Everything worth telling the user about, deduplicated and in a total order
+   * (see `DELTA_SEVERITY`).
+   */
   deltas: Delta[];
   /** The snapshot that should replace `prev` after this check. */
   next: Snapshot;
+}
+
+/**
+ * Display order of the delta kinds, most consequential first.
+ *
+ * This is deliberately NOT the same thing as which rule wins when one pull
+ * request qualifies for several: that is decided by the precedence documented on
+ * `diff`, and by the time a delta exists it has already been assigned exactly
+ * one kind. This constant only orders the finished list.
+ *
+ * The order is chosen so the array already reads the way the report should:
+ * finished outcomes first, then whatever still needs attention, then pure
+ * notices. It matches the README's example output and the renderer's own group
+ * order, so the layer above does not have to sort again.
+ */
+const DELTA_SEVERITY: Record<Delta["kind"], number> = {
+  merged: 0,
+  closed: 1,
+  unresolved: 2,
+  stale: 3,
+  new: 4,
+};
+
+/**
+ * Total order over deltas: kind, then key, then most recent activity first.
+ *
+ * The order is spelled out rather than inherited from how the entries happened
+ * to be enumerated. `Object.keys` and `Map` iteration follow insertion order,
+ * which is a property of the input, not of the result -- two callers passing the
+ * same set in different orders would otherwise get differently ordered reports.
+ *
+ * `key` cannot tie, since it is the primary key of the snapshot, but `updatedAt`
+ * is still compared so the ordering stays total rather than merely "stable in
+ * practice". It is also the more useful second question: within one kind, the
+ * pull request that moved most recently is the one worth reading first, which is
+ * what the README's example shows.
+ */
+function compareDeltas(left: Delta, right: Delta): number {
+  const bySeverity = DELTA_SEVERITY[left.kind] - DELTA_SEVERITY[right.kind];
+  if (bySeverity !== 0) return bySeverity;
+
+  if (left.key !== right.key) return left.key < right.key ? -1 : 1;
+
+  // ISO 8601 in UTC sorts lexicographically, so no date parsing is needed. A
+  // later timestamp sorts first.
+  if (left.updatedAt !== right.updatedAt) {
+    return left.updatedAt < right.updatedAt ? 1 : -1;
+  }
+
+  return 0;
 }
 
 /**
@@ -79,7 +132,8 @@ function toDelta(kind: Delta["kind"], key: string, source: PrRecord): Delta {
  * caller resolved it out of band, because "gone from the open list" is equally
  * consistent with merged and with closed-unmerged.
  *
- * Classification precedence, highest first:
+ * Classification precedence, highest first. Exactly one rule claims each pull
+ * request, so no entry can be reported twice:
  *
  * 1. `prev` state is already terminal -> carried forward verbatim. Never
  *    reported, never re-evaluated, and never pruned by this function (see
@@ -95,13 +149,22 @@ function toDelta(kind: Delta["kind"], key: string, source: PrRecord): Delta {
  * 4. Present in both -> `stale` on the first crossing of `staleDays`, then
  *    silence until new activity resets the flag.
  *
+ * Two rules in that list can never contend, and it is worth saying so rather
+ * than leaving it implied: `unresolved` requires the entry to be ABSENT from the
+ * open set while `new` requires it to be PRESENT, so a single pull request
+ * cannot qualify for both. Their relative rank is therefore unobservable, and
+ * the ordering above is the resolution for the cases that do overlap -- chiefly
+ * terminal versus stale, where the finished fact has to win.
+ *
  * Both silences are transitions, not states, so the snapshot has to carry the
  * distinction between "already reported" and "not yet reported". `staleReported`
  * does that for staleness and `departedReported` for an unresolvable departure:
  * testing only "is it currently past the threshold", or only "is it currently
  * gone from the open set", would re-report the same pull request on every single
  * check. A terminal state needs no flag of its own -- `state` already says the
- * outcome was recorded.
+ * outcome was recorded. The same reasoning covers `new`: a newly noticed entry
+ * is recorded in `next`, so the following check finds it in `prev` and has
+ * nothing to announce.
  *
  * Those flags travel with the value this function returns, not with any store it
  * touches. `diff` never writes anything: it records on the `next` record the
@@ -204,6 +267,10 @@ export function diff(
       staleReported: isAtLeastDaysOld(fresh.updatedAt, now, staleDays),
     };
   }
+
+  // Deduplicated by construction: each key is visited once and assigned exactly
+  // one kind, so no pull request can appear twice.
+  deltas.sort(compareDeltas);
 
   return {
     deltas,

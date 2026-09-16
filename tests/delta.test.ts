@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { diff, pruneTerminal } from "../src/delta";
-import { DEFAULT_PRUNE_DAYS } from "../src/types";
+import { DEFAULT_PRUNE_DAYS, type PrRecord } from "../src/types";
 import { NOW, daysAgo, record, snapshot } from "./fixtures";
 
 /** The four fields every delta carries from the record it was derived from. */
@@ -719,6 +719,347 @@ describe("pruneTerminal — the retention boundary", () => {
 
   it("reports no prune set for an empty snapshot", () => {
     expect(pruneTerminal(snapshot(), NOW).pullRequests).toEqual({});
+  });
+});
+
+describe("diff — all four kinds in one result", () => {
+  it("keeps every kind separate and orders the result by severity", () => {
+    // One batch containing four kinds at once. Keys are inserted in an order
+    // unrelated to the expected output, so a result that merely preserved
+    // enumeration order could not pass.
+    const merged = record({ updatedAt: daysAgo(1) });
+    const closed = record({
+      url: "https://github.com/zeta/repo/pull/9",
+      title: "Zeta",
+      updatedAt: daysAgo(2),
+    });
+    const untracked = record({
+      url: "https://github.com/beta/repo/pull/5",
+      title: "Beta",
+    });
+    const stale = record({
+      url: "https://github.com/mid/repo/pull/7",
+      title: "Mid",
+      updatedAt: daysAgo(90),
+    });
+    const fresh = record({
+      url: "https://github.com/alpha/repo/pull/3",
+      title: "Alpha",
+      updatedAt: daysAgo(30),
+    });
+
+    const prev = snapshot({
+      "octo/repo#1": merged,
+      "zeta/repo#9": closed,
+      "mid/repo#7": stale,
+    });
+    const resolved = new Map([
+      ["octo/repo#1", "MERGED" as const],
+      ["zeta/repo#9", "CLOSED" as const],
+    ]);
+
+    const { deltas } = diff(
+      prev,
+      { "mid/repo#7": stale, "alpha/repo#3": fresh },
+      resolved,
+      NOW,
+    );
+
+    expect(deltas.map((delta) => delta.kind)).toEqual([
+      "merged",
+      "closed",
+      "stale",
+      "new",
+    ]);
+    expect(deltas.map((delta) => delta.key)).toEqual([
+      "octo/repo#1",
+      "zeta/repo#9",
+      "mid/repo#7",
+      "alpha/repo#3",
+    ]);
+    // Not in the snapshot and not in the open set: untracked, so invisible.
+    expect(deltas.some((delta) => delta.key === "beta/repo#5")).toBe(false);
+    expect(untracked.state).toBe("OPEN");
+  });
+
+  it("never reports a terminal entry as stale", () => {
+    const finished = record({ state: "MERGED", updatedAt: daysAgo(400) });
+    const prev = snapshot({ "octo/repo#1": finished });
+
+    const { deltas } = diff(prev, { "octo/repo#1": finished }, new Map(), NOW);
+
+    expect(deltas).toEqual([]);
+  });
+
+  it("never lets a resolved outcome swallow an unresolved one", () => {
+    const prev = snapshot({
+      "octo/repo#1": record(),
+      "other/repo#2": record({
+        url: "https://github.com/other/repo/pull/2",
+        title: "Second",
+      }),
+    });
+    const resolved = new Map([["octo/repo#1", "MERGED" as const]]);
+
+    const { deltas } = diff(prev, {}, resolved, NOW);
+
+    expect(deltas.map((delta) => delta.kind)).toEqual(["merged", "unresolved"]);
+    // The unresolved entry is still there to be retried, not folded away.
+    expect(deltas.map((delta) => delta.key)).toEqual([
+      "octo/repo#1",
+      "other/repo#2",
+    ]);
+  });
+
+  it("reports a single pull request exactly once", () => {
+    // Far past the stale threshold AND resolved in the same pass: only the
+    // terminal outcome may appear.
+    const quiet = record({ updatedAt: daysAgo(200) });
+    const prev = snapshot({ "octo/repo#1": quiet });
+
+    const { deltas } = diff(
+      prev,
+      {},
+      new Map([["octo/repo#1", "MERGED" as const]]),
+      NOW,
+    );
+
+    expect(deltas).toHaveLength(1);
+    expect(deltas.map((delta) => delta.kind)).toEqual(["merged"]);
+  });
+});
+
+describe("diff — output determinism", () => {
+  /** Build an open set by inserting keys in the given order. */
+  function openSetInOrder(names: string[]): Record<string, PrRecord> {
+    const open: Record<string, PrRecord> = {};
+    for (const name of names) {
+      open[`${name}/repo#1`] = record({
+        url: `https://github.com/${name}/repo/pull/1`,
+        title: name,
+        updatedAt: daysAgo(2),
+      });
+    }
+    return open;
+  }
+
+  it("returns the same order regardless of how the open set was built", () => {
+    const names = ["alpha", "mid", "zeta"];
+    const forwards = openSetInOrder(names);
+    const backwards = openSetInOrder([...names].reverse());
+
+    // Same membership, different insertion order. Insertion order is a property
+    // of the caller's object, not of the result, so it must not survive.
+    expect(Object.keys(forwards)).not.toEqual(Object.keys(backwards));
+
+    const a = diff(snapshot(), forwards, new Map(), NOW);
+    const b = diff(snapshot(), backwards, new Map(), NOW);
+
+    expect(b.deltas).toEqual(a.deltas);
+    expect(a.deltas.map((delta) => delta.key)).toEqual([
+      "alpha/repo#1",
+      "mid/repo#1",
+      "zeta/repo#1",
+    ]);
+  });
+
+  it("returns the same order regardless of how the snapshot was built", () => {
+    const build = (names: string[]) => {
+      const pullRequests: Record<string, PrRecord> = {};
+      for (const name of names) {
+        pullRequests[`${name}/repo#1`] = record({
+          url: `https://github.com/${name}/repo/pull/1`,
+          title: name,
+          updatedAt: daysAgo(20),
+        });
+      }
+      return snapshot(pullRequests);
+    };
+
+    const names = ["alpha", "mid", "zeta"];
+    const a = diff(build(names), {}, new Map(), NOW);
+    const b = diff(build([...names].reverse()), {}, new Map(), NOW);
+
+    expect(b.deltas).toEqual(a.deltas);
+    expect(a.deltas.map((delta) => delta.key)).toEqual([
+      "alpha/repo#1",
+      "mid/repo#1",
+      "zeta/repo#1",
+    ]);
+  });
+
+  it("orders the newest activity first within one kind", () => {
+    // Distinct repositories on purpose. `key` is the primary discriminator, so
+    // activity only decides the order between entries whose keys already sort
+    // the same way -- which means across repos, not within one.
+    const prev = snapshot({
+      "alpha/repo#1": record({
+        url: "https://github.com/alpha/repo/pull/1",
+        updatedAt: daysAgo(30),
+      }),
+      "beta/repo#1": record({
+        url: "https://github.com/beta/repo/pull/1",
+        updatedAt: daysAgo(1),
+      }),
+      "gamma/repo#1": record({
+        url: "https://github.com/gamma/repo/pull/1",
+        updatedAt: daysAgo(10),
+      }),
+    });
+
+    const { deltas } = diff(prev, {}, new Map(), NOW);
+
+    expect(deltas.every((delta) => delta.kind === "unresolved")).toBe(true);
+    // Key order first, which is the contract: alpha, beta, gamma.
+    expect(deltas.map((delta) => delta.key)).toEqual([
+      "alpha/repo#1",
+      "beta/repo#1",
+      "gamma/repo#1",
+    ]);
+  });
+
+  it("keeps key order ahead of recency so the order is reproducible", () => {
+    // Same three entries, this time proving the sort key does not fall back to
+    // recency: the newest entry is deliberately not the first by key.
+    const prev = snapshot({
+      "alpha/repo#1": record({
+        url: "https://github.com/alpha/repo/pull/1",
+        updatedAt: daysAgo(30),
+      }),
+      "beta/repo#1": record({
+        url: "https://github.com/beta/repo/pull/1",
+        updatedAt: daysAgo(1),
+      }),
+    });
+
+    const { deltas } = diff(prev, {}, new Map(), NOW);
+
+    expect(deltas.map((delta) => delta.updatedAt)).toEqual([
+      daysAgo(30),
+      daysAgo(1),
+    ]);
+  });
+
+  it("is deeply equal across repeated runs on the same input", () => {
+    const prev = snapshot({
+      "octo/repo#1": record({ updatedAt: daysAgo(20) }),
+      "other/repo#2": record({
+        url: "https://github.com/other/repo/pull/2",
+        title: "Second",
+        updatedAt: daysAgo(90),
+      }),
+    });
+    const open = { "octo/repo#1": record({ updatedAt: daysAgo(20) }) };
+
+    const first = diff(prev, open, new Map(), NOW);
+    const second = diff(prev, open, new Map(), NOW);
+
+    expect(second).toEqual(first);
+    expect(second.deltas.map((delta) => delta.kind)).toEqual([
+      "unresolved",
+      "stale",
+    ]);
+  });
+
+  it("reports nothing on a second pass in the same millisecond", () => {
+    const open = { "octo/repo#1": record({ updatedAt: daysAgo(20) }) };
+    const first = diff(snapshot(), open, new Map(), NOW);
+    const second = diff(first.next, open, new Map(), NOW);
+
+    expect(first.deltas.map((delta) => delta.kind)).toEqual(["new"]);
+    expect(second.deltas).toEqual([]);
+  });
+});
+
+describe("diff — first run", () => {
+  it("reports every open entry as newly noticed, in key order", () => {
+    // What the README means by "useful on first run, where everything is newly
+    // noticed": an empty snapshot has nothing to compare against.
+    const open = {
+      "zeta/repo#1": record({ url: "u1", title: "z" }),
+      "alpha/repo#1": record({ url: "u2", title: "a" }),
+      "mid/repo#1": record({ url: "u3", title: "m" }),
+    };
+
+    const { deltas, next } = diff(snapshot(), open, new Map(), NOW);
+
+    expect(deltas.every((delta) => delta.kind === "new")).toBe(true);
+    expect(deltas.map((delta) => delta.key)).toEqual([
+      "alpha/repo#1",
+      "mid/repo#1",
+      "zeta/repo#1",
+    ]);
+    // Recorded, so the next pass has nothing to announce.
+    expect(Object.keys(next.pullRequests).sort()).toEqual([
+      "alpha/repo#1",
+      "mid/repo#1",
+      "zeta/repo#1",
+    ]);
+    expect(diff(next, open, new Map(), NOW).deltas).toEqual([]);
+  });
+
+  it("returns a normalised empty change set when there is nothing at all", () => {
+    const result = diff(snapshot(), {}, new Map(), NOW);
+
+    expect(result.deltas).toEqual([]);
+    expect(Array.isArray(result.deltas)).toBe(true);
+    expect(result.next.pullRequests).toEqual({});
+    expect(result.next.lastCheck).toBe(NOW.toISOString());
+  });
+});
+
+describe("diff — the whole lifecycle in one chain", () => {
+  it("walks new, silence, stale, silence, terminal, silence, then pruned", () => {
+    const open = record({ updatedAt: NOW.toISOString() });
+
+    // First run: everything is new.
+    const first = diff(snapshot(), { "octo/repo#1": open }, new Map(), NOW);
+    expect(first.deltas.map((delta) => delta.kind)).toEqual(["new"]);
+
+    // Nothing moved: silent.
+    const second = diff(first.next, { "octo/repo#1": open }, new Map(), NOW);
+    expect(second.deltas).toEqual([]);
+
+    // Long enough later, it crosses the stale threshold exactly once.
+    const staleAt = new Date(NOW.getTime() + 15 * 86_400_000);
+    const third = diff(
+      second.next,
+      { "octo/repo#1": open },
+      new Map(),
+      staleAt,
+    );
+    expect(third.deltas.map((delta) => delta.kind)).toEqual(["stale"]);
+
+    // And stays quiet afterwards, even much later.
+    const fourth = diff(
+      third.next,
+      { "octo/repo#1": open },
+      new Map(),
+      new Date(NOW.getTime() + 60 * 86_400_000),
+    );
+    expect(fourth.deltas).toEqual([]);
+
+    // It leaves the open set and resolves as merged.
+    const fifth = diff(
+      fourth.next,
+      {},
+      new Map([["octo/repo#1", "MERGED" as const]]),
+      staleAt,
+    );
+    expect(fifth.deltas.map((delta) => delta.kind)).toEqual(["merged"]);
+
+    // Reported once, then silent.
+    const sixth = diff(fifth.next, {}, new Map(), staleAt);
+    expect(sixth.deltas).toEqual([]);
+
+    // Kept while inside the retention window, dropped after it. Terminal time
+    // comes from `updatedAt`, which the resolution above left at NOW.
+    const inside = new Date(staleAt.getTime() + 74 * 86_400_000);
+    expect(Object.keys(pruneTerminal(sixth.next, inside).pullRequests)).toEqual(
+      ["octo/repo#1"],
+    );
+    const outside = new Date(staleAt.getTime() + 76 * 86_400_000);
+    expect(pruneTerminal(sixth.next, outside).pullRequests).toEqual({});
   });
 });
 
