@@ -1699,17 +1699,23 @@ describe("renderWatch", () => {
     expect(text).toContain("1 day ago");
   });
 
-  it("orders groups merged, closed, stale, unresolved, new", () => {
+  it("groups adjacent deltas of the same kind, in the order it receives them", () => {
+    // `diff` returns deltas already totally ordered, so the renderer walks that
+    // order rather than imposing one. It groups runs: same-kind deltas must be
+    // adjacent in the input, and the output follows the input order.
     const deltas = [
-      { ...merged, kind: "new" as const },
-      { ...merged, kind: "stale" as const },
-      { ...merged, kind: "merged" as const },
+      { ...merged, kind: "merged" as const, key: "octo/repo#1" },
+      { ...merged, kind: "merged" as const, key: "octo/repo#2" },
+      { ...merged, kind: "unresolved" as const, key: "octo/repo#3" },
+      { ...merged, kind: "new" as const, key: "octo/repo#4" },
     ];
     const text = renderWatch(value({ deltas }), false);
-    expect(text.indexOf("Merged (1):")).toBeLessThan(
-      text.indexOf("Became stale (1):"),
+
+    expect(text).toContain("Merged (2):");
+    expect(text.indexOf("Merged (2):")).toBeLessThan(
+      text.indexOf("Could not resolve (1):"),
     );
-    expect(text.indexOf("Became stale (1):")).toBeLessThan(
+    expect(text.indexOf("Could not resolve (1):")).toBeLessThan(
       text.indexOf("Newly noticed (1):"),
     );
   });
@@ -1783,15 +1789,6 @@ const HEADINGS: Record<Delta["kind"], string> = {
   new: "🆕 Newly noticed",
 };
 
-/** Stable display order; most consequential first. */
-const ORDER: Delta["kind"][] = [
-  "merged",
-  "closed",
-  "stale",
-  "unresolved",
-  "new",
-];
-
 const MS_PER_DAY = 86_400_000;
 
 /** Human-readable age of a timestamp relative to the check time. */
@@ -1837,9 +1834,23 @@ export function renderWatch(value: WatchValue, all: boolean): string {
     return lines.join("\n");
   }
 
-  for (const kind of ORDER) {
-    const group = value.deltas.filter((delta) => delta.kind === kind);
-    if (group.length === 0) continue;
+  // `diff` already returns deltas in a total order: kind by severity, then key,
+  // then most recent activity. The report is therefore built by walking that
+  // order and grouping runs of the same kind.
+  //
+  // Declaring a display order here as well would be a second source of truth for
+  // the same decision. The two could disagree -- as they briefly did, when this
+  // step ordered `stale` above `unresolved` while `diff` ordered them the other
+  // way -- and nothing would fail, because each is internally consistent. One
+  // order, owned by the layer that computes the deltas.
+  let index = 0;
+  while (index < value.deltas.length) {
+    const kind = value.deltas[index].kind;
+    const group: Delta[] = [];
+    while (index < value.deltas.length && value.deltas[index].kind === kind) {
+      group.push(value.deltas[index]);
+      index += 1;
+    }
     lines.push(`${HEADINGS[kind]} (${group.length}):`);
     for (const delta of group) {
       lines.push(
@@ -1855,7 +1866,8 @@ export function renderWatch(value: WatchValue, all: boolean): string {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `pnpm vitest run tests/render.test.ts`
-Expected: PASS, 6 tests.
+Expected: PASS. If the grouping case fails, the renderer is not grouping adjacent
+runs — check that it walks `value.deltas` in order rather than filtering per kind.
 
 - [ ] **Step 5: Commit**
 
