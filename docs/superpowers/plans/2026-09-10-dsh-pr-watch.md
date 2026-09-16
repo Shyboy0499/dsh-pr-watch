@@ -904,7 +904,7 @@ git commit -m "test: cover terminal pruning"
 
 ---
 
-## Task 8: `snapshotPath()` resolution
+## Task 8: `snapshotPath()` resolution — ✅ done (merged as #16)
 
 **Files:**
 
@@ -947,9 +947,16 @@ describe("snapshotPath", () => {
     );
   });
 
-  it("lets an explicit override win over the environment", () => {
-    process.env.DSH_HOME = "/tmp/dsh-home";
-    expect(snapshotPath("/tmp/custom.json")).toBe("/tmp/custom.json");
+  it("rejects a relative DSH_HOME", () => {
+    process.env.DSH_HOME = "relative/dir";
+    expect(() => snapshotPath()).toThrow(/absolute/);
+  });
+
+  it("rejects whitespace padding before reporting the absolute-path problem", () => {
+    // Padding is what makes an absolute path read as relative, so the diagnosis
+    // must name the padding rather than the absoluteness.
+    process.env.DSH_HOME = " /tmp/dsh-home";
+    expect(() => snapshotPath()).toThrow(/whitespace/);
   });
 });
 ```
@@ -964,18 +971,64 @@ Expected: FAIL — cannot resolve `../src/snapshot`.
 ```ts
 import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { SNAPSHOT_VERSION, emptySnapshot, type Snapshot } from "./types";
 
-/** Where the snapshot lives: `$DSH_HOME/pr-watch/snapshot.json`, else `~/.dsh/...`. */
-export function snapshotPath(override?: string): string {
-  if (override !== undefined && override.trim() !== "") return override;
-  const configured = process.env.DSH_HOME?.trim();
-  const base =
-    configured !== undefined && configured !== ""
-      ? configured
-      : join(homedir(), ".dsh");
-  return join(base, "pr-watch", "snapshot.json");
+/**
+ * Where the snapshot lives: `$DSH_HOME/pr-watch/snapshot.json`, else `~/.dsh/...`.
+ *
+ * Pure: both inputs are arguments, so every case is testable without touching the
+ * real environment or the real home directory.
+ *
+ * Rejections, each stating its reason in the message:
+ *
+ * - leading or trailing whitespace -> throw. Almost always a quoting accident, and
+ *   trimming would read and write a different location than the one written down.
+ *   Checked BEFORE absoluteness, because padding is what makes an absolute path
+ *   look relative -- the wrong error fires first otherwise.
+ * - a relative path -> throw. It would resolve against the working directory, so
+ *   the same configuration would select different snapshots depending on where the
+ *   plugin was launched.
+ * - an empty home directory with no `DSH_HOME` -> throw, rather than produce a path
+ *   containing `undefined`.
+ *
+ * Carries no override argument: the README records the path as not settable in v1,
+ * and a pure function with arguments gives tests the injection an override existed
+ * for, without a parameter that exists only for them.
+ */
+export function resolveSnapshotPath(
+  dshHome: string | undefined,
+  homeDirectory: string,
+): string {
+  const segments = ["pr-watch", "snapshot.json"];
+
+  if (dshHome === undefined || dshHome.trim() === "") {
+    if (homeDirectory.trim() === "") {
+      throw new Error(
+        "Cannot resolve the snapshot path: the home directory is empty and DSH_HOME is not set.",
+      );
+    }
+    return join(homeDirectory, ".dsh", ...segments);
+  }
+
+  if (dshHome.trim() !== dshHome) {
+    throw new Error(
+      `DSH_HOME has leading or trailing whitespace, which is almost always a quoting mistake: "${dshHome}".`,
+    );
+  }
+
+  if (!isAbsolute(dshHome)) {
+    throw new Error(
+      `DSH_HOME must be an absolute path, got "${dshHome}". A relative path would select a different snapshot depending on the working directory.`,
+    );
+  }
+
+  return join(dshHome, ...segments);
+}
+
+/** The only place the environment and the home directory are read. */
+export function snapshotPath(): string {
+  return resolveSnapshotPath(process.env.DSH_HOME, homedir());
 }
 
 export interface LoadResult {
