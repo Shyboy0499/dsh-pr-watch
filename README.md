@@ -20,14 +20,14 @@
 | ----------------------------------------------------------- | ------------------------------------- |
 | `package.json`, `tsconfig.json`, `tsdown.config.ts`, bundle | ✅ In place                           |
 | `src/types.ts` — `PrRecord`, `Snapshot`, `Delta`, constants | ✅ In place                           |
+| `src/delta.ts` — the pure diff core                         | ✅ In place, 31 tests                 |
 | `src/index.ts` — plugin entry (`name`, `inject`, `apply`)   | ✅ In place, registers **zero** tools |
 | CI — typecheck, lint, format, test, build                   | ✅ Green on every pull request        |
-| `src/delta.ts` — the pure diff core                         | ⛔ Not implemented                    |
 | `src/snapshot.ts` — load, quarantine, atomic save           | ⛔ Not implemented                    |
 | `src/gh-exec.ts` — `gh` invocation and mapping              | ⛔ Not implemented                    |
 | `src/tools/watch.ts` — the `pr_watch` tool                  | ⛔ Not implemented                    |
 
-Thirteen tests pass. The entry point is real and tested, but its tool list is empty, so **installing this plugin today registers nothing.**
+Forty-four tests pass. The diff core is complete and tested, but nothing calls it yet and the plugin's tool list is empty, so **installing this plugin today registers nothing.**
 
 ## Why
 
@@ -153,7 +153,7 @@ The design is complete and the work is broken into fifteen tasks in the
 | State | Tasks                                                                |
 | ----- | -------------------------------------------------------------------- |
 | ✅    | 1–3 — scaffolding, types, test fixtures                              |
-| ⛔    | 4–7 — the pure `delta.ts` core                                       |
+| ✅    | 4–7 — the pure `delta.ts` core                                       |
 | ⛔    | 8–10 — `snapshot.ts`: path resolution, load, quarantine, atomic save |
 | ⛔    | 11–12 — `gh-exec.ts`: invocation, record mapping, error handling     |
 | ⛔    | 13–14 — `renderWatch()` and the `pr_watch` tool, then registration   |
