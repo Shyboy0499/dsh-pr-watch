@@ -37,7 +37,21 @@ function ageInDays(iso: string, now: Date): number | null {
   return (now.getTime() - then) / MS_PER_DAY;
 }
 
-/** Whether `iso` is at least `days` old. Unknown ages are never old enough. */
+/**
+ * Whether `iso` is at least `days` old. Unknown ages are never old enough.
+ *
+ * The comparison is INCLUSIVE (`>=`), so an entry whose age has reached exactly
+ * `days` counts. "No activity for 14 days" already describes the day it reaches
+ * fourteen, and the alternative would make the rule depend on which side of a
+ * millisecond the check happened to land -- the same pull request reported stale
+ * or not depending on when the user asked. With `staleDays: 0` this makes every
+ * entry with a non-future timestamp stale, which is the intended meaning of a
+ * zero-day threshold rather than an accident.
+ *
+ * A future timestamp yields a negative age and is therefore never stale. That
+ * matters because a backwards clock or a bad API payload would otherwise read as
+ * "long inactive" and announce a staleness that never happened.
+ */
 function isAtLeastDaysOld(iso: string, now: Date, days: number): boolean {
   const age = ageInDays(iso, now);
   return age !== null && age >= days;
@@ -77,6 +91,23 @@ function toDelta(kind: Delta["kind"], key: string, source: PrRecord): Delta {
  *    next snapshot records that so the following check stays quiet.
  * 4. Present in both -> `stale` on the first crossing of `staleDays`, then
  *    silence until new activity resets the flag.
+ *
+ * Staleness is a transition, not a state, which is what makes `staleReported`
+ * necessary: testing only "is it currently past the threshold" would re-report
+ * the same pull request on every single check. The distinction the snapshot must
+ * carry is therefore "crossed and already reported" versus "just crossed".
+ *
+ * The flag travels with the value this function returns, not with any store it
+ * touches. `diff` never writes anything: it records the flag it believes should
+ * be persisted on the `next` record, and deciding to save that snapshot is the
+ * caller's business. That keeps the module pure and makes every transition above
+ * a fixture-driven test rather than an assertion about disk.
+ *
+ * The flag is set when a `stale` delta is emitted, and also when an entry is
+ * first announced as `new` while already past the threshold -- otherwise the
+ * following check would immediately announce the same entry again as stale.
+ * It is cleared when an entry's `updatedAt` moves, since activity restarts the
+ * clock; a cleared flag lets a later crossing be reported again.
  */
 export function diff(
   prev: Snapshot,
@@ -118,6 +149,9 @@ export function diff(
     }
 
     delete stillOpen[key];
+
+    // The inclusive threshold decides staleness; the flag decides whether this
+    // check is the one that reports it.
     const isStale = isAtLeastDaysOld(fresh.updatedAt, now, staleDays);
 
     // Activity moved the clock, so any previous staleness report is spent.
@@ -129,11 +163,16 @@ export function diff(
       deltas.push(toDelta("stale", key, fresh));
       next[key] = { ...fresh, staleReported: true };
     } else {
+      // Either not stale yet, or already reported. Recording `staleReported`
+      // as-is is what keeps a long-stale entry quiet on every later check.
       next[key] = { ...fresh, staleReported };
     }
   }
 
-  // 3. Announced exactly once, and never also reported as stale in the same pass.
+  // 3. Announced exactly once, and never also reported as stale in the same
+  //    pass. An entry that is already past the threshold records the flag now,
+  //    so the next check is silent rather than announcing the same staleness
+  //    right after announcing the entry itself.
   for (const [key, fresh] of Object.entries(stillOpen)) {
     deltas.push(toDelta("new", key, fresh));
     next[key] = {

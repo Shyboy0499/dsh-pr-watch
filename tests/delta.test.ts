@@ -245,6 +245,196 @@ describe("diff — staleness", () => {
   });
 });
 
+describe("diff — the staleness threshold boundary", () => {
+  /** An ISO timestamp `days` before NOW, with sub-day precision preserved. */
+  function atDaysBefore(days: number): string {
+    return new Date(NOW.getTime() - days * 86_400_000).toISOString();
+  }
+
+  // The threshold is inclusive: an entry is stale once its age has REACHED
+  // staleDays, because "no activity for 14 days" already describes that day.
+  // These cases pin the decision rather than leaving it to whichever operator
+  // happens to be written.
+  it("counts an age of exactly staleDays as stale", () => {
+    const exactly = record({ updatedAt: atDaysBefore(14) });
+    const prev = snapshot({ "octo/repo#1": exactly });
+
+    const { deltas } = diff(prev, { "octo/repo#1": exactly }, new Map(), NOW);
+
+    expect(deltas.map((delta) => delta.kind)).toEqual(["stale"]);
+  });
+
+  it("stays silent one millisecond below the threshold", () => {
+    const justUnder = record({ updatedAt: atDaysBefore(14 - 1 / 86_400_000) });
+    const prev = snapshot({ "octo/repo#1": justUnder });
+
+    const { deltas } = diff(prev, { "octo/repo#1": justUnder }, new Map(), NOW);
+
+    expect(deltas).toEqual([]);
+  });
+
+  it("treats a zero-day threshold as inclusive of the present", () => {
+    const present = record({ updatedAt: NOW.toISOString() });
+    const prev = snapshot({ "octo/repo#1": present });
+
+    const { deltas } = diff(prev, { "octo/repo#1": present }, new Map(), NOW, {
+      staleDays: 0,
+    });
+
+    expect(deltas.map((delta) => delta.kind)).toEqual(["stale"]);
+  });
+});
+
+describe("diff — staleness precedence and silence", () => {
+  it("does not repeat the report on an unchanged second check", () => {
+    // The regression this whole task exists for: checking twice in a row with
+    // nothing happening in between must not report the same staleness again.
+    const stale = record({ updatedAt: daysAgo(20) });
+    const first = diff(
+      snapshot({ "octo/repo#1": stale }),
+      { "octo/repo#1": stale },
+      new Map(),
+      NOW,
+    );
+    const second = diff(first.next, { "octo/repo#1": stale }, new Map(), NOW);
+
+    expect(first.deltas.map((delta) => delta.kind)).toEqual(["stale"]);
+    expect(second.deltas).toEqual([]);
+    expect(second.next.pullRequests["octo/repo#1"].staleReported).toBe(true);
+  });
+
+  it("reports an entry already past the threshold that has never been reported", () => {
+    // Reachable when an entry is first taken into the snapshot without having
+    // been judged before, e.g. a snapshot written by an older schema.
+    const old = record({ updatedAt: daysAgo(30), staleReported: false });
+    const prev = snapshot({ "octo/repo#1": old });
+
+    const { deltas, next } = diff(prev, { "octo/repo#1": old }, new Map(), NOW);
+
+    expect(deltas.map((delta) => delta.kind)).toEqual(["stale"]);
+    expect(next.pullRequests["octo/repo#1"].staleReported).toBe(true);
+  });
+
+  it("reports every entry that crosses in the same batch, independently", () => {
+    const a = record({ updatedAt: daysAgo(20) });
+    const b = record({
+      url: "https://github.com/other/repo/pull/2",
+      title: "Second",
+      updatedAt: daysAgo(30),
+    });
+    const c = record({
+      url: "https://github.com/third/repo/pull/3",
+      title: "Third",
+      updatedAt: daysAgo(2),
+    });
+    const prev = snapshot({
+      "octo/repo#1": a,
+      "other/repo#2": b,
+      "third/repo#3": c,
+    });
+
+    const { deltas, next } = diff(
+      prev,
+      { "octo/repo#1": a, "other/repo#2": b, "third/repo#3": c },
+      new Map(),
+      NOW,
+    );
+
+    expect(deltas.map((delta) => delta.key)).toEqual([
+      "octo/repo#1",
+      "other/repo#2",
+    ]);
+    expect(next.pullRequests["third/repo#3"].staleReported).toBe(false);
+  });
+
+  it("never reports staleness for an entry that left the open set", () => {
+    // The departure wins: its terminal state is unknown, so calling it stale
+    // would be a second, competing claim about the same pull request.
+    const quiet = record({ updatedAt: daysAgo(60) });
+    const prev = snapshot({ "octo/repo#1": quiet });
+
+    const { deltas } = diff(prev, {}, new Map(), NOW);
+
+    expect(deltas.map((delta) => delta.kind)).toEqual(["unresolved"]);
+  });
+
+  it("never reports staleness for a terminal entry however old", () => {
+    const finished = record({ state: "MERGED", updatedAt: daysAgo(400) });
+    const prev = snapshot({ "octo/repo#1": finished });
+
+    const { deltas } = diff(prev, { "octo/repo#1": finished }, new Map(), NOW);
+
+    expect(deltas).toEqual([]);
+  });
+
+  it("never reports staleness when the open set is empty", () => {
+    const quiet = record({ updatedAt: daysAgo(60) });
+    const prev = snapshot({ "octo/repo#1": quiet });
+
+    const { deltas } = diff(prev, {}, new Map(), NOW);
+
+    expect(deltas.some((delta) => delta.kind === "stale")).toBe(false);
+  });
+
+  it("never reports staleness against an empty snapshot", () => {
+    const { deltas } = diff(snapshot(), {}, new Map(), NOW);
+
+    expect(deltas).toEqual([]);
+  });
+});
+
+describe("diff — clock anomalies", () => {
+  it("does not call a future timestamp stale", () => {
+    // A backwards clock or a bad API payload puts updatedAt ahead of now. That
+    // is a negative age, which must never read as "long inactive".
+    const future = record({
+      updatedAt: new Date(NOW.getTime() + 5 * 86_400_000).toISOString(),
+    });
+    const prev = snapshot({ "octo/repo#1": future });
+
+    const { deltas, next } = diff(
+      prev,
+      { "octo/repo#1": future },
+      new Map(),
+      NOW,
+    );
+
+    expect(deltas).toEqual([]);
+    expect(next.pullRequests["octo/repo#1"].staleReported).toBe(false);
+  });
+
+  it("does not call an implausibly distant future timestamp stale", () => {
+    const future = record({ updatedAt: "9999-12-31T23:59:59.000Z" });
+    const prev = snapshot({ "octo/repo#1": future });
+
+    const { deltas } = diff(prev, { "octo/repo#1": future }, new Map(), NOW);
+
+    expect(deltas).toEqual([]);
+  });
+
+  it("is unaffected by the wall clock, only by the injected now", () => {
+    // Two runs in the same millisecond must agree, and a much later run over
+    // the snapshot the first run produced must stay silent: nothing reads a
+    // clock of its own, and the flag travels with the snapshot.
+    const stale = record({ updatedAt: daysAgo(20) });
+    const prev = snapshot({ "octo/repo#1": stale });
+    const open = { "octo/repo#1": stale };
+
+    const first = diff(prev, open, new Map(), NOW);
+    const repeat = diff(prev, open, new Map(), NOW);
+    const later = diff(
+      first.next,
+      open,
+      new Map(),
+      new Date(NOW.getTime() + 365 * 86_400_000),
+    );
+
+    expect(repeat).toEqual(first);
+    // A year on, the flag the first run recorded is still in force.
+    expect(later.deltas).toEqual([]);
+  });
+});
+
 describe("diff — the reported check time", () => {
   it("records the injected clock on the next snapshot", () => {
     const { next } = diff(snapshot(), {}, new Map(), NOW);
