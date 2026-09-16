@@ -20,14 +20,16 @@
 | ----------------------------------------------------------- | ------------------------------------- |
 | `package.json`, `tsconfig.json`, `tsdown.config.ts`, bundle | ✅ In place                           |
 | `src/types.ts` — `PrRecord`, `Snapshot`, `Delta`, constants | ✅ In place                           |
-| `src/delta.ts` — the pure diff core                         | ✅ In place, 31 tests                 |
+| `src/delta.ts` — the pure diff core                         | ✅ In place                           |
 | `src/index.ts` — plugin entry (`name`, `inject`, `apply`)   | ✅ In place, registers **zero** tools |
 | CI — typecheck, lint, format, test, build                   | ✅ Green on every pull request        |
 | `src/snapshot.ts` — load, quarantine, atomic save           | ⛔ Not implemented                    |
 | `src/gh-exec.ts` — `gh` invocation and mapping              | ⛔ Not implemented                    |
 | `src/tools/watch.ts` — the `pr_watch` tool                  | ⛔ Not implemented                    |
 
-Forty-four tests pass. The diff core is complete and tested, but nothing calls it yet and the plugin's tool list is empty, so **installing this plugin today registers nothing.**
+The diff core is complete and tested, but nothing calls it yet and the plugin's tool list is empty, so **installing this plugin today registers nothing.**
+
+Test counts are deliberately not listed here. They went stale within one pull request, and CI already reports them per commit — a number in prose is a claim nobody re-checks.
 
 ## Why
 
