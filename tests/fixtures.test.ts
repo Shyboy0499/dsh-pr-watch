@@ -20,6 +20,7 @@ describe("fixtures", () => {
       createdAt: daysAgo(30),
       updatedAt: daysAgo(1),
       staleReported: false,
+      departedReported: false,
     });
   });
 
