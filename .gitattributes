@@ -1,0 +1,22 @@
+# Normalise line endings in the repository, not on the developer's machine.
+#
+# Without this, a Windows checkout with core.autocrlf enabled would rewrite the
+# LF endings in tracked text, and `pnpm pack` would then ship a tarball whose
+# contents differ from the one built on Linux. Pinning `eol=lf` makes the packed
+# README, LICENSE and cordis.patch.yml byte-identical across platforms, which is
+# what lets the release tarball be verified on one machine and trusted on another.
+* text=auto eol=lf
+
+# Binary files must never be converted; a changed byte corrupts them.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.tgz binary
+
+# Lockfiles are machine-generated and must stay byte-stable.
+pnpm-lock.yaml text eol=lf -diff
+

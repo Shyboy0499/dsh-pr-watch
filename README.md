@@ -1,6 +1,6 @@
 # dsh-pr-watch
 
-![Status](https://img.shields.io/badge/status-scaffolding%20only-orange)
+![Status](https://img.shields.io/badge/status-pre--release-orange)
 ![License](https://img.shields.io/github/license/Shyboy0499/dsh-pr-watch)
 ![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-plugin-blue)
 
@@ -8,7 +8,11 @@
 
 `dsh-pr-watch` is a dependency-free [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) plugin that exposes one agent tool, **`pr_watch`**. It tracks every pull request you authored, **across all repositories — including ones you have never cloned** — and tells you only what changed since you last looked.
 
-> **Status: scaffolding only.** The plugin skeleton, its types, and their tests are in place and CI is green. **The `pr_watch` tool itself is not implemented yet** — everything below describes the behaviour it is being built to, not behaviour you can use today. Nothing is published to npm, so the install command does not work either.
+> **Status: pre-release.** The implementation is complete: the plugin registers
+> exactly one tool, `pr_watch`, and the whole pipeline is covered by the test
+> suite. **Nothing is published to npm yet, so the install command below does not
+> work today.** It is included so the intended path is clear, not because it is
+> ready.
 >
 > - Design: [`docs/superpowers/specs/2026-09-10-dsh-pr-watch-design.md`](docs/superpowers/specs/2026-09-10-dsh-pr-watch-design.md)
 > - Plan: [`docs/superpowers/plans/2026-09-10-dsh-pr-watch.md`](docs/superpowers/plans/2026-09-10-dsh-pr-watch.md)
@@ -16,18 +20,21 @@
 
 ## What works today
 
-| Piece                                                       | State                                 |
-| ----------------------------------------------------------- | ------------------------------------- |
-| `package.json`, `tsconfig.json`, `tsdown.config.ts`, bundle | ✅ In place                           |
-| `src/types.ts` — `PrRecord`, `Snapshot`, `Delta`, constants | ✅ In place                           |
-| `src/delta.ts` — the pure diff core                         | ✅ In place                           |
-| `src/index.ts` — plugin entry (`name`, `inject`, `apply`)   | ✅ In place, registers **zero** tools |
-| CI — typecheck, lint, format, test, build                   | ✅ Green on every pull request        |
-| `src/snapshot.ts` — load, quarantine, atomic save           | ⛔ Not implemented                    |
-| `src/gh-exec.ts` — `gh` invocation and mapping              | ⛔ Not implemented                    |
-| `src/tools/watch.ts` — the `pr_watch` tool                  | ⛔ Not implemented                    |
+| Piece                                                       | State                                           |
+| ----------------------------------------------------------- | ----------------------------------------------- |
+| `package.json`, `tsconfig.json`, `tsdown.config.ts`, bundle | ✅ In place                                     |
+| `src/types.ts` — `PrRecord`, `Snapshot`, `Delta`, constants | ✅ In place                                     |
+| `src/delta.ts` — the pure diff core                         | ✅ In place                                     |
+| `src/snapshot.ts` — load, quarantine, atomic save           | ✅ In place                                     |
+| `src/gh-exec.ts` — `gh` invocation and record mapping       | ✅ In place                                     |
+| `src/tools/watch.ts` — the report renderer                  | ✅ In place                                     |
+| `src/tools/pr-watch.ts` — the `pr_watch` tool               | ✅ In place                                     |
+| `src/index.ts` — plugin entry (`name`, `inject`, `apply`)   | ✅ In place, registers **one** tool: `pr_watch` |
+| CI — typecheck, lint, format, test, build                   | ✅ Green on every pull request                  |
+| Published to npm                                            | ⛔ Not yet — the install command does not work  |
 
-The diff core is complete and tested, but nothing calls it yet and the plugin's tool list is empty, so **installing this plugin today registers nothing.**
+Installing this plugin today registers `pr_watch`. What is still missing is the
+release itself, not the tool.
 
 Test counts are deliberately not listed here. They went stale within one pull request, and CI already reports them per commit — a number in prose is a claim nobody re-checks.
 
@@ -39,7 +46,10 @@ An agent has no memory of your last check, so every status question gets re-deri
 
 ## Features
 
-> ⚠️ **Designed, not built.** Everything from here down to [Known limitations](#known-limitations) describes the intended behaviour. None of it is implemented yet — see [What works today](#what-works-today) for the honest state.
+> **Implemented, pending release.** Everything below is built and covered by the
+> test suite. It is not on npm yet, so there is no way to install it other than
+> from a checkout — see [Installation](#installation) and
+> [What works today](#what-works-today).
 
 | Behaviour                      | Detail                                                                |
 | ------------------------------ | --------------------------------------------------------------------- |
@@ -67,7 +77,19 @@ Only pull requests that actually changed incur a second call — normally zero o
 dsh plugin --profile web add dsh-pr-watch
 ```
 
-> Not yet published — see the status note above.
+> **Not yet published, so this command does not work today.** It is the intended
+> path once the package is released.
+
+Until then, install from a checkout. `dsh plugin` forwards its arguments to
+`pnpm` in the profile directory and anchors a relative path spec to the
+directory you ran it from, so a local link works on every platform:
+
+```sh
+pnpm install && pnpm run build
+dsh plugin --profile web add link:.
+```
+
+Run that from the repository root.
 
 Requires the [GitHub CLI](https://cli.github.com) (`gh`) on your `PATH`, authenticated:
 
@@ -156,10 +178,13 @@ The design is complete and the work is broken into fifteen tasks in the
 | ----- | -------------------------------------------------------------------- |
 | ✅    | 1–3 — scaffolding, types, test fixtures                              |
 | ✅    | 4–7 — the pure `delta.ts` core                                       |
-| ⛔    | 8–10 — `snapshot.ts`: path resolution, load, quarantine, atomic save |
-| ⛔    | 11–12 — `gh-exec.ts`: invocation, record mapping, error handling     |
-| ⛔    | 13–14 — `renderWatch()` and the `pr_watch` tool, then registration   |
-| ⛔    | 15 — build wiring, README, publish preparation                       |
+| ✅    | 8–10 — `snapshot.ts`: path resolution, load, quarantine, atomic save |
+| ✅    | 11–12 — `gh-exec.ts`: invocation, record mapping, error handling     |
+| ✅    | 13–14 — `renderWatch()` and the `pr_watch` tool, then registration   |
+| 🔜    | 15 — build wiring, README, publish preparation                       |
+
+The remaining work is a release, not a feature: the package has not been
+published, so `dsh plugin --profile web add dsh-pr-watch` cannot resolve yet.
 
 ## Development
 
@@ -172,7 +197,21 @@ pnpm run typecheck    # tsc --noEmit
 pnpm run format       # prettier --write .
 ```
 
-The test suite makes **no network requests**. `delta.ts` is pure — no filesystem, no network, no clock — so every state-transition rule is a fixture-driven unit test with no mocking.
+The test suite makes **no network requests** and never runs `gh`. `delta.ts` and
+`tools/watch.ts` are pure — no filesystem, no network, no clock — and every IO
+module takes its dependencies as arguments, so the whole pipeline is driven by
+fixtures and injected executors rather than mocks.
+
+To check the built artifact rather than the sources, run `pnpm run build` and
+then load `lib/index.js`: it must export `name`, `inject`, `apply`, and a `tools`
+array of exactly one entry. `pnpm pack` should produce a tarball containing only
+`lib/index.js`, `cordis.patch.yml`, `package.json`, `README.md`, `LICENSE`, and
+`SECURITY.md`.
+
+On Windows, `pnpm` organises `node_modules` with symlinks, which needs Developer
+Mode or an elevated shell; without it, installs fail with `EPERM`. The npm cache
+and store are redirected inside the repository by `.npmrc`, so nothing is written
+outside the checkout.
 
 ## License
 
