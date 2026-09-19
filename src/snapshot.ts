@@ -1,6 +1,15 @@
-import { readFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import {
   SNAPSHOT_VERSION,
   type PrRecord,
@@ -385,4 +394,409 @@ export async function loadSnapshot(path: string): Promise<SnapshotLoad> {
   }
 
   return { status: "ok", path, snapshot: validated.snapshot };
+}
+
+/* -------------------------------------------------------------------------
+ * Write side — task 10.
+ *
+ * This is the only code in the plugin that modifies the disk, and therefore the
+ * only code that can destroy a user's state. Two rules govern all of it:
+ *
+ *   1. The snapshot body is never deleted. Quarantine *moves* it; the atomic
+ *      save replaces it by rename. The only files ever removed are temporary
+ *      files this module itself created, matched by an exact name pattern.
+ *   2. Nothing fails silently. Every write failure leaves the previous snapshot
+ *      intact and throws.
+ * ---------------------------------------------------------------------- */
+
+/** A write-side failure: the previous snapshot is untouched and the caller must know. */
+export class SnapshotWriteError extends Error {
+  /** The errno from the underlying failure, when there was one. */
+  readonly code: string | null;
+
+  constructor(message: string, code: string | null = null) {
+    super(message);
+    this.name = "SnapshotWriteError";
+    this.code = code;
+  }
+}
+
+/**
+ * A load result proven to be corruption, and therefore safe to quarantine.
+ *
+ * The brand is what enforces the single most important rule on this side: an
+ * `unreadable` file has *not* been shown to be damaged -- it may be perfectly
+ * intact and merely locked, or behind a permission the process lacks. Moving it
+ * aside would destroy pending changes exactly the way the README warns a silent
+ * reset would. Because only `loadSnapshot` can mint the brand, an unreadable
+ * result cannot be passed to {@link quarantineCorruptSnapshot} at all: it is a
+ * type error, not a runtime check that someone has to remember to write.
+ */
+declare const quarantineToken: unique symbol;
+
+export type QuarantinableSnapshot = Extract<
+  SnapshotLoad,
+  { status: "corrupt" }
+> & {
+  readonly [quarantineToken]: true;
+};
+
+/**
+ * Narrow a load result to the quarantine-eligible case.
+ *
+ * The single place the brand above is minted. Returns `null` for `missing`,
+ * `ok`, and -- critically -- `unreadable`.
+ */
+export function asQuarantinable(
+  result: SnapshotLoad,
+): QuarantinableSnapshot | null {
+  if (result.status !== "corrupt") return null;
+  return result as QuarantinableSnapshot;
+}
+
+/**
+ * Rename onto an existing file can fail on Windows while a virus scanner, an
+ * editor, or another instance holds the target open. These are the errnos that
+ * mean "try again", as opposed to a real problem that retrying cannot fix.
+ */
+const TRANSIENT_RENAME_CODES: ReadonlySet<string> = new Set([
+  "EPERM",
+  "EACCES",
+  "EBUSY",
+]);
+
+/** How many times a rename is attempted before the failure is surfaced. */
+const RENAME_ATTEMPTS = 5;
+
+/** Baseline backoff between rename attempts, doubled after each failure. */
+const RENAME_BACKOFF_MS = 20;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** The errno carried by a failed filesystem call, if any. */
+function errorCode(error: unknown): string | null {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return typeof code === "string" ? code : null;
+}
+
+/**
+ * `rename`, retried while the failure looks transient.
+ *
+ * On POSIX the rename itself is atomic, so this normally succeeds first try. On
+ * Windows the same call can fail with `EPERM`/`EACCES`/`EBUSY` purely because
+ * something else has the destination open. Silently giving up there would lose
+ * the save, so it is retried with a short exponential backoff and then reported.
+ */
+async function renameWithRetry(from: string, to: string): Promise<void> {
+  let delay = RENAME_BACKOFF_MS;
+
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await rename(from, to);
+      return;
+    } catch (error) {
+      const code = errorCode(error);
+      if (
+        attempt >= RENAME_ATTEMPTS ||
+        code === null ||
+        !TRANSIENT_RENAME_CODES.has(code)
+      ) {
+        throw error;
+      }
+      await sleep(delay);
+      delay *= 2;
+    }
+  }
+}
+
+/**
+ * Name of the temporary file a save writes before renaming it into place.
+ *
+ * The pid separates concurrent instances and the random suffix separates two
+ * saves inside the same millisecond, which a pid alone does not. Both are
+ * needed: a collision would have two writers renaming over each other.
+ */
+function temporaryName(target: string): string {
+  return `${basename(target)}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
+}
+
+/** Whether `name` is a temporary file this module created for `target`. */
+function isTemporaryFor(name: string, target: string): boolean {
+  const prefix = `${basename(target)}.tmp-`;
+  if (!name.startsWith(prefix)) return false;
+  return /^\d+-[0-9a-f]+$/.test(name.slice(prefix.length));
+}
+
+/** Orphaned temporaries older than this are leftovers from a crashed run. */
+const ORPHAN_AGE_MS = 60_000;
+
+/**
+ * Remove temporary files this module left behind, from runs that died between
+ * writing and renaming.
+ *
+ * Two deliberate limits. Only names matching {@link isTemporaryFor} are
+ * considered, so a user's own `snapshot.json.bak` is never touched and the
+ * directory is never cleared wholesale. And only files older than
+ * {@link ORPHAN_AGE_MS} are removed, so a *concurrent* instance's in-flight
+ * temporary -- which is younger by definition -- cannot be deleted out from
+ * under it.
+ *
+ * Best effort by design: this is housekeeping, so a failure here must not fail a
+ * save that otherwise succeeded.
+ */
+async function removeOrphanedTemporaries(
+  target: string,
+  now: number,
+): Promise<void> {
+  let names: string[];
+  try {
+    names = await readdir(dirname(target));
+  } catch {
+    return;
+  }
+
+  for (const name of names) {
+    if (!isTemporaryFor(name, target)) continue;
+
+    const candidate = join(dirname(target), name);
+    try {
+      const stats = await stat(candidate);
+      if (now - stats.mtimeMs < ORPHAN_AGE_MS) continue;
+      await rm(candidate, { force: true });
+    } catch {
+      // Another instance may have cleaned it first, or it may be locked. Either
+      // way this is not the save's problem.
+    }
+  }
+}
+
+export interface SaveSnapshotOptions {
+  /**
+   * Remove leftover temporary files from crashed runs before writing.
+   *
+   * On by default. Tests turn it off to assert what a save does on its own.
+   */
+  cleanupOrphans?: boolean;
+}
+
+/**
+ * Write `snapshot` to `path` atomically.
+ *
+ * The body is written to a temporary file *in the same directory* and then
+ * renamed over the target. Same directory is not an optimisation: it keeps the
+ * rename within one filesystem, which is what makes it atomic. A temporary in
+ * `os.tmpdir()` could land on another volume, where the rename fails with
+ * `EXDEV` and is not atomic even when it succeeds.
+ *
+ * The consequence is the property the README promises: a crash mid-write can
+ * never leave a truncated snapshot that reads as "everything vanished". The
+ * target holds either the complete previous snapshot or the complete new one,
+ * never a partial write.
+ *
+ * The parent directory is created when missing -- the snapshot directory is
+ * this module's own, so it is this module's to create. If that fails, or if the
+ * write or rename fails, the previous snapshot is left untouched and a
+ * {@link SnapshotWriteError} is thrown.
+ *
+ * The body is UTF-8 with no BOM, `JSON.stringify(…, 2)`, and a trailing
+ * newline. Field order follows the object's declaration order, which is stable
+ * for a given shape but not semantically meaningful: the loader reads by key,
+ * so a reordering is not a format change.
+ *
+ * @param path - absolute path to the snapshot file.
+ * @param snapshot - the complete snapshot to store.
+ * @throws {SnapshotWriteError} when the snapshot could not be replaced.
+ */
+export async function saveSnapshot(
+  path: string,
+  snapshot: Snapshot,
+  options: SaveSnapshotOptions = {},
+): Promise<void> {
+  const directory = dirname(path);
+  const temporary = join(directory, temporaryName(path));
+
+  try {
+    await mkdir(directory, { recursive: true });
+  } catch (error) {
+    throw new SnapshotWriteError(
+      `Could not create the snapshot directory ${directory}: ${oneLine((error as Error).message)}`,
+      errorCode(error),
+    );
+  }
+
+  // Written without a BOM on purpose. The loader strips one to tolerate files
+  // from elsewhere, but this module should not be the reason one appears.
+  const body = `${JSON.stringify(snapshot, null, 2)}\n`;
+
+  try {
+    await writeFile(temporary, body, "utf8");
+  } catch (error) {
+    await discard(temporary);
+    throw new SnapshotWriteError(
+      `Could not write the temporary snapshot ${temporary}: ${oneLine((error as Error).message)}`,
+      errorCode(error),
+    );
+  }
+
+  try {
+    await renameWithRetry(temporary, path);
+  } catch (error) {
+    // The target still holds the previous snapshot, which is the safe outcome.
+    // The temporary is removed so the failure leaves nothing behind.
+    await discard(temporary);
+    throw new SnapshotWriteError(
+      `Could not replace the snapshot at ${path}: ${oneLine((error as Error).message)}. ` +
+        "The previous snapshot is unchanged.",
+      errorCode(error),
+    );
+  }
+
+  if (options.cleanupOrphans !== false) {
+    await removeOrphanedTemporaries(path, Date.now());
+  }
+}
+
+/** Remove a temporary file, ignoring failures: there is nothing useful to say. */
+async function discard(temporary: string): Promise<void> {
+  try {
+    await rm(temporary, { force: true });
+  } catch {
+    // Best effort. A leftover temporary is harmless and is swept on a later save.
+  }
+}
+
+/**
+ * The name a quarantined snapshot is moved to, given the slot number.
+ *
+ * Exported because the suffix is part of the user-visible contract: the README
+ * documents `snapshot.json.corrupt-<n>`, and task 13's output repeats it.
+ */
+export function quarantinePath(path: string, slot: number): string {
+  return `${path}.corrupt-${slot}`;
+}
+
+/** Highest slot already taken, or 0 when none is. */
+async function highestOccupiedSlot(path: string): Promise<number> {
+  const prefix = `${basename(path)}.corrupt-`;
+  let highest = 0;
+
+  let names: string[];
+  try {
+    names = await readdir(dirname(path));
+  } catch {
+    return 0;
+  }
+
+  for (const name of names) {
+    if (!name.startsWith(prefix)) continue;
+    const slot = Number.parseInt(name.slice(prefix.length), 10);
+    if (Number.isInteger(slot) && slot > highest) highest = slot;
+  }
+
+  return highest;
+}
+
+/** Slots are tried from 1 upwards; this bounds a directory that is somehow full. */
+const QUARANTINE_SLOT_LIMIT = 10_000;
+
+/**
+ * How many slots one call may lose to concurrent writers before giving up.
+ *
+ * Losing a slot means another instance took the name between the scan and the
+ * rename. A handful of losses is plausible; hundreds would mean something is
+ * actively racing, and stopping is safer than spinning.
+ */
+const QUARANTINE_MAX_ATTEMPTS = 50;
+
+/**
+ * Move a corrupt snapshot aside so a fresh one can be written, never deleting it.
+ *
+ * Implements the README's "quarantined, never discarded": the file is *renamed*
+ * to `snapshot.json.corrupt-<n>`, byte for byte, and the caller is told where it
+ * went so the user can be told too. The alternative -- resetting silently --
+ * would lose pending changes with no way to distinguish that from "nothing
+ * happened".
+ *
+ * `n` starts at the first free slot above the highest one already present, so an
+ * existing quarantine is never overwritten -- losing an earlier damaged
+ * snapshot to a later one would be the same data loss in a different place.
+ *
+ * Takes a branded {@link QuarantinableSnapshot} rather than a `SnapshotLoad`, so
+ * an `unreadable` result cannot reach here: a file that could not be read is not
+ * known to be damaged, and moving it would destroy a healthy snapshot.
+ *
+ * @param result - a load result produced by {@link asQuarantinable}.
+ * @returns the path the file now occupies.
+ * @throws {SnapshotWriteError} when the file could not be moved.
+ */
+export async function quarantineCorruptSnapshot(
+  result: QuarantinableSnapshot,
+): Promise<string> {
+  const { path } = result;
+  const firstSlot = (await highestOccupiedSlot(path)) + 1;
+
+  if (firstSlot > QUARANTINE_SLOT_LIMIT)
+    throw exhausted(path, QUARANTINE_SLOT_LIMIT);
+
+  let destination = quarantinePath(path, firstSlot);
+
+  for (let attempt = 0; attempt < QUARANTINE_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      // Atomic on the same filesystem, and it fails rather than overwriting if
+      // the destination appeared between the scan above and this call.
+      await rename(path, destination);
+      return destination;
+    } catch (error) {
+      const code = errorCode(error);
+
+      if (code === "ENOENT") {
+        throw new SnapshotWriteError(
+          `Could not quarantine ${path}: it no longer exists. Nothing was moved.`,
+          code,
+        );
+      }
+
+      // The destination is taken. Overwriting it would destroy an earlier
+      // damaged snapshot, which is the same data loss in a different place, so
+      // step to the next free slot instead.
+      if (code === "EEXIST" || code === "ENOTEMPTY" || code === "EISDIR") {
+        const next = nextFreeSlot(destination, path);
+        if (next === null) throw exhausted(path, QUARANTINE_SLOT_LIMIT);
+        destination = next;
+        continue;
+      }
+
+      throw new SnapshotWriteError(
+        `Could not quarantine ${path} to ${destination}: ${oneLine((error as Error).message)}. ` +
+          "The file has been left where it is.",
+        code,
+      );
+    }
+  }
+
+  // Every attempt lost its slot to another writer. Giving up is correct: the
+  // file stays where it is, and nothing that already exists was overwritten.
+  throw new SnapshotWriteError(
+    `Could not quarantine ${path} after ${QUARANTINE_MAX_ATTEMPTS} attempts, because other ` +
+      "writers kept claiming the next slot. The file has been left where it is and no " +
+      "existing quarantine file was overwritten.",
+    null,
+  );
+}
+
+/** The next unused `.corrupt-<n>` path after `from`, or `null` past the limit. */
+function nextFreeSlot(from: string, path: string): string | null {
+  const prefix = `${basename(path)}.corrupt-`;
+  const current = Number.parseInt(basename(from).slice(prefix.length), 10);
+  const next = (Number.isInteger(current) ? current : 0) + 1;
+  return next > QUARANTINE_SLOT_LIMIT ? null : quarantinePath(path, next);
+}
+
+/** The error raised when the slot space is used up. */
+function exhausted(path: string, limit: number): SnapshotWriteError {
+  return new SnapshotWriteError(
+    `Could not quarantine ${path}: no free .corrupt-<n> slot below ${limit}. ` +
+      "No existing quarantine file was overwritten.",
+    null,
+  );
 }
