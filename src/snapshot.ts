@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import {
   mkdir,
+  open,
   readFile,
   readdir,
   rename,
@@ -9,7 +10,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, join, posix, win32 } from "node:path";
 import {
   SNAPSHOT_VERSION,
   type PrRecord,
@@ -42,6 +43,25 @@ export class SnapshotPathError extends Error {
  */
 function isBlank(value: string | undefined): value is undefined {
   return value === undefined || value.trim() === "";
+}
+
+/**
+ * Whether `value` is absolute in a way that cannot depend on where the process
+ * happens to be running.
+ *
+ * The platform's own `isAbsolute` is not enough on Windows: it accepts
+ * `/tmp/dsh`, a "rooted" path with no drive letter, and `join` then resolves it
+ * against whichever drive the process happens to be on. That is the same silent
+ * divergence the relative-path rejection exists to prevent, so a drive-relative
+ * form is refused here. A UNC path (`\\server\share`) is accepted, because it
+ * names its own location. On POSIX the platform rule is already unambiguous.
+ */
+function isUnambiguousAbsolute(
+  value: string,
+  platform: NodeJS.Platform,
+): boolean {
+  if (platform !== "win32") return posix.isAbsolute(value);
+  return /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\");
 }
 
 /**
@@ -78,13 +98,17 @@ function isBlank(value: string | undefined): value is undefined {
  *
  * @param dshHome - the `DSH_HOME` value, or `undefined` when it is not set.
  * @param homeDirectory - the user's home directory, already resolved.
+ * @param platform - the platform whose path rules apply. Injectable so the
+ *   Windows-only rejection below can be driven from a POSIX test run.
  * @throws {SnapshotPathError} when the inputs cannot produce an absolute path.
  */
 export function resolveSnapshotPath(
   dshHome: string | undefined,
   homeDirectory: string,
+  platform: NodeJS.Platform = process.platform,
 ): string {
   const segments = [WATCH_DIRECTORY_NAME, SNAPSHOT_FILE_NAME];
+  const joinFor = platform === "win32" ? win32.join : posix.join;
 
   if (isBlank(dshHome)) {
     if (typeof homeDirectory !== "string" || homeDirectory.trim() === "") {
@@ -93,7 +117,7 @@ export function resolveSnapshotPath(
           `Set DSH_HOME to an absolute directory, or make sure ${FALLBACK_HOME_DIRECTORY_NAME} can be located.`,
       );
     }
-    return join(homeDirectory, FALLBACK_HOME_DIRECTORY_NAME, ...segments);
+    return joinFor(homeDirectory, FALLBACK_HOME_DIRECTORY_NAME, ...segments);
   }
 
   const home = dshHome;
@@ -110,21 +134,25 @@ export function resolveSnapshotPath(
     );
   }
 
-  if (!isAbsolute(home)) {
+  if (!isUnambiguousAbsolute(home, platform)) {
     throw new SnapshotPathError(
-      `DSH_HOME must be an absolute path, got "${dshHome}". A relative path would select a ` +
-        "different snapshot depending on the working directory, so it is rejected rather than guessed.",
+      platform === "win32"
+        ? `DSH_HOME must be a fully qualified Windows path, got "${dshHome}". A path with no drive ` +
+            "letter or UNC prefix resolves against whichever drive the process happens to be on, so it " +
+            "is rejected rather than guessed."
+        : `DSH_HOME must be an absolute path, got "${dshHome}". A relative path would select a ` +
+            "different snapshot depending on the working directory, so it is rejected rather than guessed.",
     );
   }
 
-  // `join` follows this platform's rules, which is the only useful answer: a home
-  // directory is meaningful on the platform it belongs to. A Windows-form path
-  // is not absolute on POSIX and a POSIX-form path is not absolute on Windows, so
-  // each is rejected by the check above on the platform where it means nothing,
-  // rather than being accepted and then joined into a mixed path no platform can
-  // use. `join` also normalises separators and collapses trailing ones, so a
-  // DSH_HOME ending in "/" or "\\" cannot produce a doubled separator.
-  return join(home, ...segments);
+  // `joinFor` follows the platform's own rules, which is the only useful answer:
+  // a home directory is meaningful on the platform it belongs to. A Windows-form
+  // path has no meaning on POSIX and a drive-relative POSIX-form path has none on
+  // Windows, so each is rejected above on the platform where it means nothing,
+  // rather than being accepted and joined into a mixed path no platform can use.
+  // `join` also normalises separators and collapses trailing ones, so a DSH_HOME
+  // ending in "/" or "\\" cannot produce a doubled separator.
+  return joinFor(home, ...segments);
 }
 
 /**
@@ -709,17 +737,36 @@ const QUARANTINE_SLOT_LIMIT = 10_000;
 const QUARANTINE_MAX_ATTEMPTS = 50;
 
 /**
+ * Claim `destination` exclusively, or fail because someone else has it.
+ *
+ * A bare `rename` cannot express "do not overwrite": POSIX `rename(2)` replaces
+ * an existing destination silently, and Node's Windows rename passes
+ * `MOVEFILE_REPLACE_EXISTING`, so the "destination already exists" branch this
+ * guards was unreachable on both platforms. The empty file it creates is
+ * overwritten by the rename that follows, so it is a reservation rather than a
+ * placeholder with content, and `readdir` makes it visible to another instance's
+ * slot scan immediately.
+ */
+async function reserveExclusively(destination: string): Promise<void> {
+  const handle = await open(destination, "wx");
+  await handle.close();
+}
+
+/**
  * Move a corrupt snapshot aside so a fresh one can be written, never deleting it.
  *
- * Implements the README's "quarantined, never discarded": the file is *renamed*
- * to `snapshot.json.corrupt-<n>`, byte for byte, and the caller is told where it
+ * Implements the README's "quarantined, never discarded": the file is moved to
+ * `snapshot.json.corrupt-<n>`, byte for byte, and the caller is told where it
  * went so the user can be told too. The alternative -- resetting silently --
  * would lose pending changes with no way to distinguish that from "nothing
  * happened".
  *
- * `n` starts at the first free slot above the highest one already present, so an
- * existing quarantine is never overwritten -- losing an earlier damaged
- * snapshot to a later one would be the same data loss in a different place.
+ * A slot is claimed by creating it exclusively before the move, so an existing
+ * quarantine can never be overwritten -- losing an earlier damaged snapshot to a
+ * later one would be the same data loss in a different place. The scan for the
+ * highest slot is only an optimisation: if it is stale, or another instance
+ * claims the same slot first, the exclusive create fails with `EEXIST` and the
+ * next slot is tried.
  *
  * Takes a branded {@link QuarantinableSnapshot} rather than a `SnapshotLoad`, so
  * an `unreadable` result cannot reach here: a file that could not be read is not
@@ -742,28 +789,45 @@ export async function quarantineCorruptSnapshot(
 
   for (let attempt = 0; attempt < QUARANTINE_MAX_ATTEMPTS; attempt += 1) {
     try {
-      // Atomic on the same filesystem, and it fails rather than overwriting if
-      // the destination appeared between the scan above and this call.
-      await rename(path, destination);
-      return destination;
+      await reserveExclusively(destination);
     } catch (error) {
       const code = errorCode(error);
 
-      if (code === "ENOENT") {
-        throw new SnapshotWriteError(
-          `Could not quarantine ${path}: it no longer exists. Nothing was moved.`,
-          code,
-        );
-      }
-
-      // The destination is taken. Overwriting it would destroy an earlier
+      // The slot is taken -- by an earlier quarantine, by another instance, or
+      // by something else entirely. Overwriting it would destroy an earlier
       // damaged snapshot, which is the same data loss in a different place, so
-      // step to the next free slot instead.
+      // step to the next slot instead.
       if (code === "EEXIST" || code === "ENOTEMPTY" || code === "EISDIR") {
         const next = nextFreeSlot(destination, path);
         if (next === null) throw exhausted(path, QUARANTINE_SLOT_LIMIT);
         destination = next;
         continue;
+      }
+
+      throw new SnapshotWriteError(
+        `Could not quarantine ${path}: could not reserve ${destination}: ${oneLine((error as Error).message)}. ` +
+          "The file has been left where it is.",
+        code,
+      );
+    }
+
+    try {
+      // Replaces only the reservation just created above, so nothing that
+      // already existed can be lost even if the scan was stale.
+      await renameWithRetry(path, destination);
+      return destination;
+    } catch (error) {
+      // Release the reservation: leaving a zero-byte `.corrupt-<n>` beside the
+      // real file would look like a recoverable copy that holds nothing.
+      await discard(destination);
+
+      const code = errorCode(error);
+
+      if (code === "ENOENT") {
+        throw new SnapshotWriteError(
+          `Could not quarantine ${path}: it no longer exists. The reserved slot was released and nothing was moved.`,
+          code,
+        );
       }
 
       throw new SnapshotWriteError(
