@@ -1,8 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
+import { prKey, type PrRecord, type TerminalState } from "./types";
 
 /* -------------------------------------------------------------------------
- * Task 11 —the `gh` invocation boundary.
+ * Task 11 — the `gh` invocation boundary.
  *
  * This is the only module in the plugin that starts an external process, and
  * therefore the only one whose behaviour depends on the machine it runs on:
@@ -679,4 +680,604 @@ export function isReadOnlyInvocation(args: readonly string[]): boolean {
   }
 
   return true;
+}
+
+/* -------------------------------------------------------------------------
+ * Task 12 — record mapping.
+ *
+ * Turns the JSON text task 11 brought back into the `PrRecord` the delta core
+ * consumes. Nothing here runs `gh`, reads a clock, or makes a business
+ * judgement: staleness, newly-noticed, and the snapshot comparison all belong
+ * to `delta.ts`. This module decides only whether the bytes it was handed are a
+ * trustworthy description of some pull requests.
+ *
+ * It is the sole source of the data every later decision rests on, and a
+ * misparse is worse than an error: a record that quietly vanishes looks to
+ * `diff()` like a pull request that left the open set, which is then reported
+ * as merged or closed. A false "merged" is user-visible and irreversible, so
+ * this module fails whole batches rather than dropping single records.
+ * ---------------------------------------------------------------------- */
+
+/**
+ * The most results phase 1 asks for.
+ *
+ * GitHub's search API returns at most 1000, but this plugin's design is
+ * premised on the user having on the order of 10-30 open pull requests. 200 is
+ * far above that and far below the API ceiling, so reaching it means something
+ * unexpected is happening and the enumeration may be incomplete. Reaching it is
+ * reported, never silently accepted: a truncated enumeration would make the
+ * missing pull requests look like departures, and `diff()` would announce them
+ * as merged.
+ */
+export const PHASE_ONE_RESULT_LIMIT = 200;
+
+/** Fields phase 1 requests from `gh search prs`. */
+export const PHASE_ONE_JSON_FIELDS = [
+  "url",
+  "title",
+  "state",
+  "createdAt",
+  "updatedAt",
+  "number",
+  "repository",
+] as const;
+
+/**
+ * Fields phase 2 requests from `gh pr view`.
+ *
+ * `updatedAt` and `title` are here beyond the state the plan originally listed,
+ * because `delta.ts` reads an entry's terminal time from `PrRecord.updatedAt`
+ * (`pruneTerminal` ages terminal entries by it) and renders `title`. Without
+ * them the resolved record would keep the snapshot's stale timestamp and the
+ * merge would be pruned against the wrong date.
+ */
+export const PHASE_TWO_JSON_FIELDS = [
+  "state",
+  "mergedAt",
+  "updatedAt",
+  "title",
+  "url",
+  "number",
+  "repository",
+] as const;
+
+/**
+ * Arguments enumerating every open pull request authored by the current user,
+ * across all repositories.
+ *
+ * `gh search prs` rather than `gh pr list`, because `pr list` is single-repo
+ * and requires either a checkout or `--repo`, while the README's promise is
+ * coverage of "repositories you have never cloned". `--author @me` is what
+ * makes the set "mine".
+ *
+ * Note what `state` can be here: GitHub's search API reports only `OPEN` or
+ * `CLOSED`, and never distinguishes a merge. That is precisely why the second
+ * phase exists -- only `gh pr view` reveals `MERGED`.
+ */
+export function phaseOneArgs(
+  limit: number = PHASE_ONE_RESULT_LIMIT,
+): readonly string[] {
+  return [
+    "search",
+    "prs",
+    "--author",
+    "@me",
+    "--state",
+    "open",
+    "--limit",
+    String(limit),
+    "--json",
+    PHASE_ONE_JSON_FIELDS.join(","),
+  ];
+}
+
+/**
+ * Arguments resolving one pull request's terminal state.
+ *
+ * Takes the canonical URL rather than `--repo owner/repo` plus a number: the
+ * URL is already the snapshot's `url` field, so it needs no reconstruction and
+ * cannot be assembled wrong. `gh pr view` accepts a URL for exactly this reason.
+ */
+export function phaseTwoArgs(url: string): readonly string[] {
+  return ["pr", "view", url, "--json", PHASE_TWO_JSON_FIELDS.join(",")];
+}
+
+/** Why a batch of JSON could not be trusted. */
+export type MappingProblem =
+  /** The text is not JSON at all. */
+  | "invalid-json"
+  /** The JSON root has the wrong shape for this phase. */
+  | "wrong-root"
+  /** A record is missing a required field, or has one of the wrong type. */
+  | "bad-record"
+  /** A record's `state` is not one this build knows. */
+  | "unknown-state"
+  /** A record carries a timestamp that cannot be parsed. */
+  | "bad-timestamp"
+  /** A record's identity cannot be expressed as `owner/repo#number`. */
+  | "bad-identity";
+
+/** The mapping of one batch, as a discriminated union. */
+export type MappingOutcome<T> =
+  | { readonly status: "ok"; readonly records: T }
+  | {
+      readonly status: "failed";
+      readonly problem: MappingProblem;
+      /** Where the problem is, and what about it, in one line. */
+      readonly detail: string;
+    };
+
+/**
+ * Parse a GitHub timestamp, returning the epoch milliseconds or `null`.
+ *
+ * GitHub emits UTC datetimes such as `2026-08-27T10:02:44Z`, and `Date.parse`
+ * handles those directly, including `+08:00` offsets. Two checks run first,
+ * because `Date.parse` is lenient in ways that would hide a broken feed:
+ *
+ * 1. A shape check. Without it `"2026"` parses as a year, which would make a
+ *    pull request look thousands of days stale -- and staleness is reported.
+ * 2. A field-range check on the leading date. `Date.parse` does not reject
+ *    `2026-02-30`; it rolls it forward to March 2 and returns a value. A feed
+ *    emitting impossible dates is broken, and silently repairing it here would
+ *    attribute activity to the wrong day.
+ *
+ * No clock is read here. A parser that called `Date.now()` could not be tested
+ * against a fixture, and the staleness comparison is `delta.ts`'s job anyway.
+ */
+export function parseTimestamp(value: unknown): number | null {
+  if (typeof value !== "string") return null;
+
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$/.exec(
+      value,
+    );
+  if (match === null) return null;
+
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (month < 1 || month > 12) return null;
+  if (day < 1 || day > daysInMonth(Number(match[1]), month)) return null;
+
+  if (match[4] !== undefined) {
+    const hour = Number(match[4]);
+    const minute = Number(match[5]);
+    const second = match[6] === undefined ? 0 : Number(match[6]);
+    if (hour > 23 || minute > 59 || second > 59) return null;
+  }
+
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+/** Days in a calendar month, counting leap years. */
+function daysInMonth(year: number, month: number): number {
+  const lengths = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (month !== 2) return lengths[month - 1];
+  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  return leap ? 29 : 28;
+}
+
+/** Whether `value` is a JSON object we can read fields from. */
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The characters GitHub permits in an owner or repository name.
+ *
+ * Validated rather than trusted, because the key is an identity: a name with a
+ * space or a stray character in it would produce a key that never matches the
+ * snapshot entry for the same pull request, and that entry would then look like
+ * a departure and be reported as merged.
+ */
+const NAME_PART = /^[A-Za-z0-9._-]+$/;
+
+/**
+ * `owner/repo#number`, from a record's `repository.nameWithOwner` and `number`.
+ */
+function identityOf(
+  raw: Record<string, unknown>,
+): { key: string; number: number } | null {
+  const repository = raw.repository;
+  if (!isObject(repository)) return null;
+
+  const nameWithOwner = repository.nameWithOwner;
+  if (
+    typeof nameWithOwner !== "string" ||
+    nameWithOwner !== nameWithOwner.trim()
+  )
+    return null;
+
+  // Exactly one slash, with a non-empty owner and repository on either side.
+  const parts = nameWithOwner.split("/");
+  if (parts.length !== 2) return null;
+  if (!NAME_PART.test(parts[0]) || !NAME_PART.test(parts[1])) return null;
+
+  const number = raw.number;
+  if (typeof number !== "number" || !Number.isInteger(number) || number < 1)
+    return null;
+
+  return { key: prKey({ nameWithOwner, number }), number };
+}
+
+/** Why one raw record could not be read. */
+type RecordProblem = { problem: MappingProblem; detail: string };
+
+/** The parts of a record both phases share. */
+interface CommonRecord {
+  key: string;
+  url: string;
+  title: string;
+  updatedAt: string;
+  state: string;
+}
+
+/**
+ * Validate the fields both phases provide, and build the identity.
+ *
+ * `repository.nameWithOwner` plus `number` is required here because it is the
+ * snapshot's primary key: a malformed one would create a second entry for a
+ * pull request already tracked, leaving the real entry to look like a departure
+ * and be reported as merged.
+ */
+function readCommonRecord(
+  raw: Record<string, unknown>,
+  where: string,
+): { ok: true; value: CommonRecord } | { ok: false; reason: RecordProblem } {
+  for (const field of ["url", "title", "updatedAt"] as const) {
+    if (typeof raw[field] !== "string") {
+      return {
+        ok: false,
+        reason: {
+          problem: "bad-record",
+          detail: `${where}.${field} must be a string, got ${describeValue(raw[field])}`,
+        },
+      };
+    }
+  }
+
+  if (typeof raw.state !== "string") {
+    return {
+      ok: false,
+      reason: {
+        problem: "bad-record",
+        detail: `${where}.state must be a string, got ${describeValue(raw.state)}`,
+      },
+    };
+  }
+
+  if (parseTimestamp(raw.updatedAt) === null) {
+    return {
+      ok: false,
+      reason: {
+        problem: "bad-timestamp",
+        detail: `${where}.updatedAt is not a parsable timestamp: ${JSON.stringify(raw.updatedAt)}`,
+      },
+    };
+  }
+
+  const identity = identityOf(raw);
+  if (identity === null) {
+    return {
+      ok: false,
+      reason: {
+        problem: "bad-identity",
+        detail: `${where} has no usable repository.nameWithOwner/number pair`,
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    value: {
+      key: identity.key,
+      url: raw.url as string,
+      title: raw.title as string,
+      updatedAt: raw.updatedAt as string,
+      state: raw.state,
+    },
+  };
+}
+
+/**
+ * Validate one phase 1 record and turn it into a `PrRecord`.
+ *
+ * Unknown extra fields are ignored, so a record written by a newer `gh` stays
+ * readable. Known fields are checked strictly: a coerced record is worse than a
+ * refused one, because it flows into the delta core and is then written back
+ * over the user's snapshot.
+ */
+function toSearchRecord(
+  raw: unknown,
+  index: number,
+):
+  | { ok: true; key: string; record: PrRecord; state: string }
+  | { ok: false; reason: RecordProblem } {
+  const where = `pullRequests[${index}]`;
+  if (!isObject(raw)) {
+    return {
+      ok: false,
+      reason: { problem: "bad-record", detail: `${where} is not an object` },
+    };
+  }
+
+  // Search results do carry createdAt, and a new entry needs it.
+  if (typeof raw.createdAt !== "string") {
+    return {
+      ok: false,
+      reason: {
+        problem: "bad-record",
+        detail: `${where}.createdAt must be a string, got ${describeValue(raw.createdAt)}`,
+      },
+    };
+  }
+  if (parseTimestamp(raw.createdAt) === null) {
+    return {
+      ok: false,
+      reason: {
+        problem: "bad-timestamp",
+        detail: `${where}.createdAt is not a parsable timestamp: ${JSON.stringify(raw.createdAt)}`,
+      },
+    };
+  }
+
+  const common = readCommonRecord(raw, where);
+  if (!common.ok) return { ok: false, reason: common.reason };
+
+  return {
+    ok: true,
+    key: common.value.key,
+    state: common.value.state,
+    record: {
+      url: common.value.url,
+      title: common.value.title,
+      state: "OPEN",
+      createdAt: raw.createdAt,
+      updatedAt: common.value.updatedAt,
+      staleReported: false,
+      departedReported: false,
+    },
+  };
+}
+
+/**
+ * Validate one phase 2 record.
+ *
+ * `createdAt` is **not** required here, because `gh pr view` asked for
+ * `state,mergedAt,updatedAt,title,url,number,repository` does not return it.
+ * The field is still part of `PrRecord`, so it is filled with the empty string
+ * and the caller merges the phase 2 result onto the record it already holds --
+ * the entry being resolved came from the snapshot, which has a real
+ * `createdAt`. Nothing downstream breaks: staleness reads `updatedAt`, and
+ * `pruneTerminal` ages terminal entries by `updatedAt` too.
+ */
+function toViewRecord(
+  raw: Record<string, unknown>,
+  where: string,
+): { ok: true; value: CommonRecord } | { ok: false; reason: RecordProblem } {
+  if (raw.createdAt !== undefined && typeof raw.createdAt !== "string") {
+    return {
+      ok: false,
+      reason: {
+        problem: "bad-record",
+        detail: `${where}.createdAt must be a string when present, got ${describeValue(raw.createdAt)}`,
+      },
+    };
+  }
+  if (
+    typeof raw.createdAt === "string" &&
+    parseTimestamp(raw.createdAt) === null
+  ) {
+    return {
+      ok: false,
+      reason: {
+        problem: "bad-timestamp",
+        detail: `${where}.createdAt is not a parsable timestamp: ${JSON.stringify(raw.createdAt)}`,
+      },
+    };
+  }
+
+  return readCommonRecord(raw, where);
+}
+
+/** A short description of a JSON value, for diagnostics. */
+function describeValue(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "an array";
+  return typeof value;
+}
+
+/** Parse JSON text, mapping a syntax error to a failure rather than a throw. */
+function parseJsonText(
+  text: string,
+): { ok: true; value: unknown } | { ok: false; detail: string } {
+  try {
+    return { ok: true, value: JSON.parse(text) };
+  } catch (error) {
+    return {
+      ok: false,
+      detail: oneLine((error as Error).message ?? String(error)),
+    };
+  }
+}
+
+/** One mapped record together with the state `gh` reported for it. */
+export interface MappedRecord {
+  readonly key: string;
+  readonly record: PrRecord;
+  /** The raw `state` string, preserved so phase 2 can resolve a terminal state. */
+  readonly rawState: string;
+}
+
+/** The result of mapping one phase 1 batch. */
+export interface PhaseOneResult {
+  readonly records: readonly MappedRecord[];
+  /**
+   * True when the batch returned exactly the number asked for.
+   *
+   * GitHub caps search results, so a full page may mean more exist. This is
+   * surfaced rather than swallowed: treating a truncated enumeration as
+   * complete would make the missing pull requests look like departures.
+   */
+  readonly atLimit: boolean;
+}
+
+/**
+ * Map phase 1 output: a JSON array of search results to mapped records.
+ *
+ * An **empty array is a success**, not a failure. It is how "you have no open
+ * pull requests" arrives, and the README's premise is that this must never be
+ * confused with a `gh` call that did not work -- which is why the caller
+ * receives this only after task 11 has already reported success.
+ *
+ * All-or-nothing: one bad record fails the batch. Skipping it would remove that
+ * pull request from the working set, and `diff()` would read the absence as a
+ * departure and report a merge that never happened.
+ *
+ * @param text - stdout from {@link phaseOneArgs}.
+ * @param limit - the limit the call was made with, used for limit detection.
+ */
+export function mapPhaseOne(
+  text: string,
+  limit: number = PHASE_ONE_RESULT_LIMIT,
+): MappingOutcome<PhaseOneResult> {
+  const parsed = parseJsonText(text);
+  if (!parsed.ok) {
+    return { status: "failed", problem: "invalid-json", detail: parsed.detail };
+  }
+
+  if (!Array.isArray(parsed.value)) {
+    return {
+      status: "failed",
+      problem: "wrong-root",
+      detail: `expected a JSON array from gh search prs, got ${describeValue(parsed.value)}`,
+    };
+  }
+
+  const records: MappedRecord[] = [];
+  for (const [index, raw] of parsed.value.entries()) {
+    const mapped = toSearchRecord(raw, index);
+    if (!mapped.ok) {
+      return {
+        status: "failed",
+        problem: mapped.reason.problem,
+        detail: mapped.reason.detail,
+      };
+    }
+    records.push({
+      key: mapped.key,
+      record: mapped.record,
+      rawState: mapped.state,
+    });
+  }
+
+  return {
+    status: "ok",
+    records: { records, atLimit: limit > 0 && records.length >= limit },
+  };
+}
+
+/** A resolved terminal record. */
+export interface ResolvedRecord {
+  readonly key: string;
+  readonly record: PrRecord;
+  /** `MERGED` or `CLOSED`; the two are never collapsed into one value. */
+  readonly terminal: TerminalState;
+}
+
+/**
+ * Map phase 2 output: one `gh pr view` object to a resolved terminal record.
+ *
+ * Only `MERGED` and `CLOSED` are accepted. Anything else is refused rather than
+ * defaulted: mapping an unrecognised state onto `CLOSED` would announce an
+ * active pull request as closed, and mapping it onto `MERGED` would claim a
+ * merge that did not happen. Either way the false report is user-visible and
+ * cannot be un-reported, since `diff()` records the outcome and stays silent
+ * about it forever after.
+ *
+ * The returned record keeps the state `gh` reported, so `diff()` carries it
+ * forward as terminal history, and takes `updatedAt` from this response so
+ * pruning ages the entry by when it actually ended.
+ */
+export function mapPhaseTwo(text: string): MappingOutcome<ResolvedRecord> {
+  const parsed = parseJsonText(text);
+  if (!parsed.ok) {
+    return { status: "failed", problem: "invalid-json", detail: parsed.detail };
+  }
+
+  if (!isObject(parsed.value)) {
+    return {
+      status: "failed",
+      problem: "wrong-root",
+      detail: `expected a JSON object from gh pr view, got ${describeValue(parsed.value)}`,
+    };
+  }
+
+  const mapped = toViewRecord(parsed.value, "pullRequests[0]");
+  if (!mapped.ok) {
+    return {
+      status: "failed",
+      problem: mapped.reason.problem,
+      detail: mapped.reason.detail,
+    };
+  }
+
+  const terminal = toTerminalState(mapped.value.state);
+  if (terminal === undefined) {
+    return {
+      status: "failed",
+      problem: "unknown-state",
+      detail:
+        `gh reported state ${JSON.stringify(mapped.value.state)}, which is neither MERGED nor CLOSED. ` +
+        "It is not guessed at: an active pull request must not be reported as finished.",
+    };
+  }
+
+  return {
+    status: "ok",
+    records: {
+      key: mapped.value.key,
+      record: {
+        url: mapped.value.url,
+        title: mapped.value.title,
+        state: terminal,
+        // Absent from `gh pr view`; the caller merges this onto the snapshot
+        // entry, which already carries the real creation time.
+        createdAt:
+          typeof parsed.value.createdAt === "string"
+            ? parsed.value.createdAt
+            : "",
+        updatedAt: mapped.value.updatedAt,
+        staleReported: false,
+        departedReported: false,
+      },
+      terminal,
+    },
+  };
+}
+
+/**
+ * The terminal state a `gh` state string denotes, or `undefined`.
+ *
+ * `gh search prs` never returns `MERGED` -- its API reports a merged pull
+ * request as `CLOSED` -- so only `gh pr view` can distinguish the two. That
+ * asymmetry is why the fetch has two phases at all, and why a resolved state is
+ * read from phase 2 alone.
+ */
+export function toTerminalState(raw: string): TerminalState | undefined {
+  if (raw === "MERGED") return "MERGED";
+  if (raw === "CLOSED") return "CLOSED";
+  return undefined;
+}
+
+/**
+ * `owner/repo#number` for one raw search result.
+ *
+ * Kept as a thin export so a caller that already has phase 1 JSON can key a
+ * record without mapping it; returns `undefined` rather than throwing so the
+ * malformed case stays on the mapping path.
+ */
+export function toPrKey(raw: unknown): string | undefined {
+  if (!isObject(raw)) return undefined;
+  return identityOf(raw)?.key;
 }
