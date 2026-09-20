@@ -6,6 +6,8 @@ import {
   classifySpawnFailure,
   isReadOnlyInvocation,
   normaliseNewlines,
+  phaseOneArgs,
+  phaseTwoArgs,
   redact,
   runGh,
   summariseStderr,
@@ -626,6 +628,14 @@ describe("isReadOnlyInvocation — the plugin only ever looks", () => {
     [["api", "--method=POST", "/x"]],
     [["api", "-f", "body=hi", "/repos/o/r/issues"]],
     [["api", "--raw-field", "body=hi", "/x"]],
+    // `gh` reads these attached spellings as the same flags, so the guard has
+    // to as well -- otherwise `-XPOST` is admitted as a read.
+    [["api", "-XPOST", "/repos/o/r/issues"]],
+    [["api", "-X", "/repos/o/r"]],
+    [["api", "-fbody=hi", "/repos/o/r/issues"]],
+    [["api", "-Fbody=hi", "/repos/o/r/issues"]],
+    [["api", "--field=body=hi", "/x"]],
+    [["api", "--raw-field=body=hi", "/x"]],
     [[]],
   ])("refuses %j", (args) => {
     expect(isReadOnlyInvocation(args)).toBe(false);
@@ -634,6 +644,17 @@ describe("isReadOnlyInvocation — the plugin only ever looks", () => {
   it("permits an explicit GET on api", () => {
     expect(isReadOnlyInvocation(["api", "-X", "GET", "/user"])).toBe(true);
     expect(isReadOnlyInvocation(["api", "--method=GET", "/user"])).toBe(true);
+    expect(isReadOnlyInvocation(["api", "-XGET", "/user"])).toBe(true);
+    expect(isReadOnlyInvocation(["api", "--method=get", "/user"])).toBe(true);
+  });
+
+  it("admits the argument lists the plugin actually builds", () => {
+    // These are the only argument lists in `src/`, and this is the check the
+    // allow-list exists for. Without it the guard would be decorative.
+    expect(isReadOnlyInvocation(phaseOneArgs())).toBe(true);
+    expect(
+      isReadOnlyInvocation(phaseTwoArgs("https://github.com/o/r/pull/1")),
+    ).toBe(true);
   });
 
   it("is an allow-list, so an unknown future write verb is refused by default", () => {
