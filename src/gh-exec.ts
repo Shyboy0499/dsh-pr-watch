@@ -647,8 +647,15 @@ const READ_ONLY_VERBS: readonly string[][] = [
  * `gh` in future. `api` is admitted only for GET requests, since
  * `gh api -X POST` is a write with the same name as a read.
  *
- * Exported because task 13 builds the real argument lists and this is the check
- * that keeps them honest.
+ * `gh` accepts every short flag in an attached spelling as well as a separated
+ * one (`-XPOST` and `-X POST`, `--field=a=b` and `--field a=b`), and both mean
+ * the same thing to it. A guard that reads only the separated forms would admit
+ * `["api", "-XPOST", "/repos/o/r/issues"]` as a read, so both spellings are
+ * checked here. The plugin issues no `api` calls today; this is the rule that
+ * has to hold if one is ever added.
+ *
+ * Exported because task 13/14 build the real argument lists and this is the
+ * check that keeps them honest.
  */
 export function isReadOnlyInvocation(args: readonly string[]): boolean {
   const permitted = READ_ONLY_VERBS.some((verb) =>
@@ -659,19 +666,35 @@ export function isReadOnlyInvocation(args: readonly string[]): boolean {
   if (args[0] === "api") {
     for (let index = 1; index < args.length; index += 1) {
       const token = args[index];
-      const isMethodFlag = token === "-X" || token === "--method";
-      const isInlineMethod = token.startsWith("--method=");
-      if (isMethodFlag && args[index + 1] !== undefined) {
-        if (args[index + 1].toUpperCase() !== "GET") return false;
+
+      if (token === "-X" || token === "--method") {
+        // A flag with no value is not a GET, so it is refused rather than
+        // skipped: `gh` would reject it too, and admitting it serves nothing.
+        const value = args[index + 1];
+        if (value === undefined || value.toUpperCase() !== "GET") return false;
         index += 1;
-      } else if (isInlineMethod) {
+        continue;
+      }
+
+      if (token.startsWith("-X") && token.length > 2) {
+        if (token.slice(2).toUpperCase() !== "GET") return false;
+        continue;
+      }
+
+      if (token.startsWith("--method=")) {
         if (token.slice("--method=".length).toUpperCase() !== "GET")
           return false;
-      } else if (
+        continue;
+      }
+
+      if (
         token === "-f" ||
         token === "--field" ||
         token === "-F" ||
-        token === "--raw-field"
+        token === "--raw-field" ||
+        token.startsWith("--field=") ||
+        token.startsWith("--raw-field=") ||
+        (token.length > 2 && (token.startsWith("-f") || token.startsWith("-F")))
       ) {
         // Implies a request body, which turns a GET-shaped call into a write.
         return false;

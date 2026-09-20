@@ -709,11 +709,6 @@ describe("buildWatchValue — phase 2 is limited to departures", () => {
       expect(KINDS(value)).toEqual(["merged"]);
     });
   });
-
-  it("is read-only by the task 11 allow-list", () => {
-    const search = ["search", "prs", "--author", "@me"];
-    expect(search[0]).toBe("search");
-  });
 });
 
 describe("buildWatchValue — a corrupt snapshot is quarantined and the round continues", () => {
