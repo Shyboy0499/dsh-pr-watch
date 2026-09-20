@@ -636,6 +636,10 @@ describe("isReadOnlyInvocation — the plugin only ever looks", () => {
     [["api", "-Fbody=hi", "/repos/o/r/issues"]],
     [["api", "--field=body=hi", "/x"]],
     [["api", "--raw-field=body=hi", "/x"]],
+    // `--input` supplies a body from a file, and gh still defaults the method
+    // to POST, so it is a write even though the flag names a file.
+    [["api", "--input", "body.json", "/repos/o/r/rulesets"]],
+    [["api", "--input=body.json", "/repos/o/r/rulesets"]],
     [[]],
   ])("refuses %j", (args) => {
     expect(isReadOnlyInvocation(args)).toBe(false);
@@ -697,6 +701,35 @@ describe("spawnGh — the real executor, driven against node instead of gh", () 
     if (outcome.status !== "ok") throw new Error("expected ok");
     expect(outcome.stdoutTruncated).toBe(false);
     expect(outcome.stdout.length).toBe(2 * 1024 * 1024);
+  });
+
+  it("does not call output truncated when it exactly fills the budget", async () => {
+    // The boundary used to compare with `>=`, which reported a full budget as
+    // truncated even though not a byte had been dropped.
+    const chunk = 65_536;
+    const outcome = await run(
+      [
+        "-e",
+        `const c='x'.repeat(${chunk}); for (let i=0;i<${MAX_OUTPUT_BYTES / chunk};i++) process.stdout.write(c);`,
+      ],
+      30_000,
+    );
+
+    if (outcome.status !== "ok") throw new Error("expected ok");
+    expect(outcome.stdout.length).toBe(MAX_OUTPUT_BYTES);
+    expect(outcome.stdoutTruncated).toBe(false);
+  });
+
+  it("flags a partial sequence left at the end of the stream", async () => {
+    // Two bytes of a three-byte character, then exit: `end()` can only emit a
+    // replacement character, and that loss has to be reported like any other.
+    const outcome = await run([
+      "-e",
+      "process.stdout.write(Buffer.from([0xe4,0xb8]))",
+    ]);
+
+    if (outcome.status !== "ok") throw new Error("expected ok");
+    expect(outcome.stdoutLossy).toBe(true);
   });
 
   it("decodes UTF-8 split across chunk boundaries", async () => {

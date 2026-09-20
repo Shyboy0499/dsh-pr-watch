@@ -474,7 +474,7 @@ export const spawnGh: GhExecutor = async (request) => {
       if (budget.truncated) return "";
       const remaining = MAX_OUTPUT_BYTES - budget.bytes;
 
-      if (chunk.length >= remaining) {
+      if (chunk.length > remaining) {
         budget.bytes = MAX_OUTPUT_BYTES;
         budget.truncated = true;
         return decoder.write(chunk.subarray(0, Math.max(remaining, 0)));
@@ -512,8 +512,12 @@ export const spawnGh: GhExecutor = async (request) => {
       if (settled) return;
       settled = true;
       if (timer !== undefined) clearTimeout(timer);
-      // Flush the decoders so a trailing partial sequence is not lost.
-      stdout += stdoutDecoder.end();
+      // Flush the decoders so a trailing partial sequence is not lost. A
+      // replacement character can only appear here if the stream ended mid
+      // sequence, which is the same loss the data handler flags.
+      const flushedStdout = stdoutDecoder.end();
+      if (flushedStdout.includes(NON_UTF8_MARKER)) stdoutLossy = true;
+      stdout += flushedStdout;
       stderr += stderrDecoder.end();
       resolve({
         ok: true,
@@ -692,11 +696,16 @@ export function isReadOnlyInvocation(args: readonly string[]): boolean {
         token === "--field" ||
         token === "-F" ||
         token === "--raw-field" ||
+        token === "--input" ||
         token.startsWith("--field=") ||
         token.startsWith("--raw-field=") ||
+        token.startsWith("--input=") ||
         (token.length > 2 && (token.startsWith("-f") || token.startsWith("-F")))
       ) {
         // Implies a request body, which turns a GET-shaped call into a write.
+        // `--input` is the least obvious of these: it names a file, and `gh`
+        // still defaults the method to POST when a body is supplied without an
+        // explicit `-X`.
         return false;
       }
     }
