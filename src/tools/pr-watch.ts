@@ -254,6 +254,7 @@ export async function buildWatchValue(
 
   const resolved = new Map<string, TerminalState>();
   const completed = new Map<string, PrRecord>();
+  const resolveFailures = new Map<string, string>();
 
   for (const key of departures) {
     const previousEntry = previous.pullRequests[key];
@@ -262,10 +263,16 @@ export async function buildWatchValue(
     const detail = await runGh(phaseTwoArgs(url), {
       executor: options.executor,
     });
-    if (detail.status === "failed") continue;
+    if (detail.status === "failed") {
+      resolveFailures.set(key, detail.message);
+      continue;
+    }
 
     const parsed = mapPhaseTwo(detail.stdout);
-    if (parsed.status === "failed") continue;
+    if (parsed.status === "failed") {
+      resolveFailures.set(key, `${parsed.problem} (${parsed.detail})`);
+      continue;
+    }
 
     resolved.set(key, parsed.records.terminal);
     // The mapping layer cannot know when the pull request was opened, because
@@ -284,6 +291,32 @@ export async function buildWatchValue(
     if (final.next.pullRequests[key] !== undefined) {
       final.next.pullRequests[key] = record;
     }
+  }
+
+  // Say *why* a resolve failed, but only for the departures this round actually
+  // announces. The report already tells the user a departure is unconfirmed;
+  // without the cause the generic note cannot distinguish an expired login from
+  // a rate limit from a pull request that no longer exists. A retry that `diff`
+  // keeps silent because it has already been reported must stay silent here too,
+  // or a permanently unresolvable entry would put a warning on every check --
+  // and the count has to match the announcement, not every failed call, or the
+  // message would name a departure the report does not mention.
+  const announcedFailures = final.deltas
+    .filter((delta) => delta.kind === "unresolved")
+    .map((delta) => [delta.key, resolveFailures.get(delta.key)] as const)
+    .filter((pair): pair is readonly [string, string] => pair[1] !== undefined);
+
+  if (announcedFailures.length > 0) {
+    const [key, reason] = announcedFailures[0];
+    const noun =
+      announcedFailures.length === 1
+        ? "One departure could not be resolved"
+        : `${announcedFailures.length} departures could not be resolved`;
+    warning = withWarning(
+      warning,
+      `${noun}; the first failure was ${key}: ${reason}. ` +
+        "They stay open and are retried on the next check.",
+    );
   }
 
   const openEntries: WatchOpenEntry[] = Object.entries(final.next.pullRequests)
