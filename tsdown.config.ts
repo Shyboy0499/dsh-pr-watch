@@ -9,7 +9,10 @@ const lib: UserConfig = {
   target: "es2022",
   fixedExtension: false,
   dts: false,
-  clean: false,
+  // The whole `lib/` directory is published, so a file left behind by an older
+  // build would ship as if it were current. Cleaning first makes the tarball a
+  // function of this build rather than of this checkout's history.
+  clean: true,
   deps: {
     neverBundle: ["@deepseek-ai/cordis", "@deepseek-ai/dsh-tools"],
   },

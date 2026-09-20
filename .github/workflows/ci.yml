@@ -63,3 +63,26 @@ jobs:
       - name: Build
         if: steps.project.outputs.present == 'true'
         run: pnpm run build
+
+      # The build step only proves tsdown exited zero. The bundle is what a user
+      # actually loads, so its surface is asserted here rather than left to the
+      # manual check in the README: a wrong outDir, a dropped export, or a
+      # main/exports drift would otherwise stay green.
+      - name: Verify the built artifact
+        if: steps.project.outputs.present == 'true'
+        run: |
+          node --input-type=module -e "
+            const m = await import('./lib/index.js');
+            const tools = m.tools ?? [];
+            const problems = [];
+            if (m.name !== 'pr-watch') problems.push('name: ' + m.name);
+            if (!Array.isArray(m.inject) || !m.inject.includes('tools')) problems.push('inject: ' + JSON.stringify(m.inject));
+            if (typeof m.apply !== 'function') problems.push('apply: ' + typeof m.apply);
+            if (tools.length !== 1) problems.push('tool count: ' + tools.length);
+            if (tools[0]?.name !== 'pr_watch') problems.push('tool: ' + tools[0]?.name);
+            console.log('name=' + m.name + ' inject=' + JSON.stringify(m.inject) + ' tools=' + tools.map((t) => t.name).join(','));
+            if (problems.length > 0) {
+              console.error('built artifact does not match the expected plugin surface: ' + problems.join('; '));
+              process.exit(1);
+            }
+          "

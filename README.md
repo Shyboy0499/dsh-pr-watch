@@ -74,10 +74,18 @@ Only pull requests that actually changed incur a second call — normally zero o
 ## Installation
 
 ```sh
-dsh plugin --profile web add dsh-pr-watch
+dsh plugin --profile PROFILE add dsh-pr-watch
 ```
 
-> **Not yet published, so this command does not work today.** It is the intended
+Replace `PROFILE` with the dsh profile you actually run — the tool only appears
+in that one. The Desktop app manages a profile of its own, so from its terminal
+omit the flag entirely and let it target the active profile:
+
+```sh
+dsh plugin add dsh-pr-watch
+```
+
+> **Not yet published, so neither command works today.** They are the intended
 > path once the package is released.
 
 Until then, install from a checkout. `dsh plugin` forwards its arguments to
@@ -86,10 +94,11 @@ directory you ran it from, so a local link works on every platform:
 
 ```sh
 pnpm install && pnpm run build
-dsh plugin --profile web add link:.
+dsh plugin --profile PROFILE add link:.
 ```
 
-Run that from the repository root.
+Run that from the repository root, and use the same profile you would have used
+above.
 
 Requires the [GitHub CLI](https://cli.github.com) (`gh`) on your `PATH`, authenticated:
 
@@ -128,10 +137,10 @@ Run it a second time and only genuine changes appear. A merge reported today is 
 
 ### Parameters
 
-| Parameter   | Type      | Description                                                                                                                               |
-| ----------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `staleDays` | `number`  | Days without activity before a pull request counts as stale. Defaults to `14`.                                                            |
-| `all`       | `boolean` | List every open pull request instead of only what changed. Useful on first run, where everything is "newly noticed". Defaults to `false`. |
+| Parameter   | Type      | Description                                                                                                                                              |
+| ----------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `staleDays` | `integer` | Whole days without activity before a pull request counts as stale. Defaults to `14`. Must be between `1` and `3650`; `0` is refused as a likely mistake. |
+| `all`       | `boolean` | List every open pull request instead of only what changed. Useful on first run, where everything is "newly noticed". Defaults to `false`.                |
 
 ### Configuration
 
@@ -182,7 +191,7 @@ The design is complete and the work is broken into fifteen tasks in the
 | ✅    | 8–10 — `snapshot.ts`: path resolution, load, quarantine, atomic save |
 | ✅    | 11–12 — `gh-exec.ts`: invocation, record mapping, error handling     |
 | ✅    | 13–14 — `renderWatch()` and the `pr_watch` tool, then registration   |
-| 🔜    | 15 — build wiring, README, publish preparation                       |
+| ✅    | 15 — build wiring, README, artifact checks                           |
 
 The remaining work is a release, not a feature: the package has not been
 published, so `dsh plugin --profile web add dsh-pr-watch` cannot resolve yet.
