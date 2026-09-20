@@ -126,6 +126,65 @@ describe("diff — silence", () => {
   });
 });
 
+describe("diff — a reopened pull request", () => {
+  it("adopts the live record and announces it again", () => {
+    // Carrying the terminal state forward used to make a reopened pull request
+    // permanently invisible: not open by state, never in a delta, never updated.
+    const prev = snapshot({
+      "octo/repo#1": record({ state: "CLOSED", updatedAt: daysAgo(10) }),
+    });
+    const reopened = record({ state: "OPEN", updatedAt: NOW.toISOString() });
+
+    const { deltas, next } = diff(
+      prev,
+      { "octo/repo#1": reopened },
+      new Map(),
+      NOW,
+    );
+
+    expect(deltas.map((delta) => delta.kind)).toEqual(["new"]);
+    expect(next.pullRequests["octo/repo#1"].state).toBe("OPEN");
+    expect(next.pullRequests["octo/repo#1"].updatedAt).toBe(reopened.updatedAt);
+  });
+
+  it("is silent on the next check, so the reopening is reported once", () => {
+    const closed = record({ state: "CLOSED", updatedAt: daysAgo(10) });
+    const reopened = record({ state: "OPEN", updatedAt: daysAgo(1) });
+
+    const first = diff(
+      snapshot({ "octo/repo#1": closed }),
+      { "octo/repo#1": reopened },
+      new Map(),
+      NOW,
+    );
+    expect(first.deltas.map((delta) => delta.kind)).toEqual(["new"]);
+
+    const second = diff(
+      first.next,
+      { "octo/repo#1": reopened },
+      new Map(),
+      NOW,
+    );
+    expect(second.deltas).toEqual([]);
+  });
+
+  it("still carries a merged pull request forward if it reappears as open", () => {
+    // A merge cannot be undone, so this is a contradiction in the feed rather
+    // than a lifecycle event, and the recorded outcome wins.
+    const merged = record({ state: "MERGED" });
+
+    const { deltas, next } = diff(
+      snapshot({ "octo/repo#1": merged }),
+      { "octo/repo#1": record() },
+      new Map(),
+      NOW,
+    );
+
+    expect(deltas).toEqual([]);
+    expect(next.pullRequests["octo/repo#1"].state).toBe("MERGED");
+  });
+});
+
 describe("diff — newly noticed", () => {
   it("reports an entry the snapshot did not know about", () => {
     const fresh = record({ updatedAt: daysAgo(2) });

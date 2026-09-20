@@ -138,7 +138,10 @@ function toDelta(kind: Delta["kind"], key: string, source: PrRecord): Delta {
  * 1. `prev` state is already terminal -> carried forward verbatim. Never
  *    reported, never re-evaluated, and never pruned by this function (see
  *    `pruneTerminal`). The state IS the record that the outcome was reported,
- *    which is why a merge or a close never repeats.
+ *    which is why a merge or a close never repeats. The one exception is a
+ *    closed entry that GitHub lists as open again: it has been reopened, so the
+ *    terminal state is no longer true and the entry rejoins the `new` rule
+ *    below rather than staying invisible forever.
  * 2. Present in `prev`, absent from `open` -> `MERGED`/`CLOSED` when `resolved`
  *    supplies a terminal state, otherwise `unresolved`. Either way the entry is
  *    kept: a terminal one carries its outcome, an unresolved one stays `OPEN`
@@ -199,8 +202,31 @@ export function diff(
     //    them from the open sweep so a stray enumeration cannot re-announce
     //    them as new.
     if (previous.state !== "OPEN") {
+      const reopened = previous.state === "CLOSED" ? stillOpen[key] : undefined;
+
+      if (reopened === undefined) {
+        delete stillOpen[key];
+        next[key] = previous;
+        continue;
+      }
+
+      // A closed pull request can be reopened, and GitHub then lists it as open
+      // again. Carrying the terminal state forward would make it permanently
+      // invisible: absent from the open set by state, absent from every delta,
+      // and never updated again. The live record is adopted instead and the
+      // entry is announced again, exactly as a newly noticed one is, so the
+      // "reported once" rule still comes from the snapshot rather than from a
+      // second flag.
+      //
+      // `MERGED` is deliberately not treated this way. A merge cannot be undone,
+      // so a merged pull request appearing in the open set is a contradiction in
+      // the feed rather than a lifecycle event, and the recorded outcome wins.
       delete stillOpen[key];
-      next[key] = previous;
+      deltas.push(toDelta("new", key, reopened));
+      next[key] = {
+        ...reopened,
+        staleReported: isAtLeastDaysOld(reopened.updatedAt, now, staleDays),
+      };
       continue;
     }
 
