@@ -107,6 +107,12 @@ describe("resolveSnapshotPath — drive-relative paths on Windows", () => {
     expect(
       resolveSnapshotPath("\\\\server\\share\\dsh", "C:\\Users\\me", "win32"),
     ).toBe(win32.join("\\\\server\\share\\dsh", ...TAIL));
+
+    // The forward-slash spelling is equally qualified, and `win32.join`
+    // normalises it -- rejecting it turned a valid path into an error.
+    expect(
+      resolveSnapshotPath("//server/share/dsh", "C:\\Users\\me", "win32"),
+    ).toBe(win32.join("//server/share/dsh", ...TAIL));
   });
 
   it("still rejects a drive-qualified path on POSIX", () => {
@@ -759,6 +765,28 @@ describe("loadSnapshot — damaged content is corrupt", () => {
       if (result.status !== "corrupt") throw new Error("unreachable");
       expect(result.reason).toBe("shape");
       expect(result.detail).toContain("99");
+    });
+  });
+
+  it("rejects a `__proto__` key instead of dropping the record silently", async () => {
+    await withTempDirectory(async (directory) => {
+      const path = join(directory, SNAPSHOT_FILE_NAME);
+      // Hand-written rather than JSON.stringify'd from an object: a `__proto__`
+      // property cannot be created by assignment in the first place, which is
+      // the same trap the loader has to avoid.
+      const body =
+        `{"version":${SNAPSHOT_VERSION},"lastCheck":"","pullRequests":{"__proto__":` +
+        `${JSON.stringify(RECORD)}}}`;
+      writeFileSync(path, body);
+
+      const result = await loadSnapshot(path);
+
+      // Assigning it reaches Object.prototype's setter, so the entry would
+      // vanish while the load still reported success.
+      expect(result.status).toBe("corrupt");
+      if (result.status !== "corrupt") throw new Error("unreachable");
+      expect(result.reason).toBe("shape");
+      expect(result.detail).toContain("__proto__");
     });
   });
 
