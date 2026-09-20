@@ -78,6 +78,45 @@ describe("resolveSnapshotPath — DSH_HOME set", () => {
   });
 });
 
+describe("resolveSnapshotPath — drive-relative paths on Windows", () => {
+  it("rejects a POSIX-form path on Windows, because it has no drive", () => {
+    // `win32.isAbsolute("/tmp/dsh")` is true, which is exactly the trap: joined,
+    // it becomes `\tmp\dsh\...` and lands on whichever drive the process happens
+    // to be on. The platform's own absolute test does not catch this.
+    expect(() =>
+      resolveSnapshotPath("/tmp/dsh", "C:\\Users\\me", "win32"),
+    ).toThrow(SnapshotPathError);
+  });
+
+  it("rejects a single-rooted backslash path on Windows", () => {
+    expect(() =>
+      resolveSnapshotPath("\\dsh", "C:\\Users\\me", "win32"),
+    ).toThrow(SnapshotPathError);
+  });
+
+  it("accepts a drive-qualified path on Windows", () => {
+    expect(resolveSnapshotPath("C:\\dsh", "C:\\Users\\me", "win32")).toBe(
+      win32.join("C:\\dsh", ...TAIL),
+    );
+    expect(resolveSnapshotPath("C:/dsh", "C:\\Users\\me", "win32")).toBe(
+      win32.join("C:\\dsh", ...TAIL),
+    );
+  });
+
+  it("accepts a UNC path on Windows", () => {
+    expect(
+      resolveSnapshotPath("\\\\server\\share\\dsh", "C:\\Users\\me", "win32"),
+    ).toBe(win32.join("\\\\server\\share\\dsh", ...TAIL));
+  });
+
+  it("still rejects a drive-qualified path on POSIX", () => {
+    // The Windows rule is additive: it does not loosen the POSIX one.
+    expect(() =>
+      resolveSnapshotPath("C:\\dsh", "C:\\Users\\me", "linux"),
+    ).toThrow(SnapshotPathError);
+  });
+});
+
 describe("resolveSnapshotPath — DSH_HOME unset", () => {
   it("falls back to the home directory", () => {
     expect(resolveSnapshotPath(undefined, homedir())).toBe(
