@@ -155,9 +155,9 @@ plan's refinements section for the full reasoning.
 ## Behaviour notes
 
 - **Staleness fires on transition, and only once.** A pull request that has been stale for weeks is reported the first time it crosses the threshold, then stays quiet. If it sees new activity, the staleness clock resets and it can be reported again later.
-- **A failed fetch writes nothing.** If `gh` fails partway through, the snapshot is left untouched so pending changes are not silently marked as seen.
+- **A failed enumeration writes nothing.** If the one `gh search` call fails, or its output cannot be read, the snapshot is left untouched so pending changes are not silently marked as seen. A failure in the resolve phase is narrower: every outcome that _was_ determined is still recorded, and the entry that could not be resolved stays `OPEN` and is retried on the next check — without being announced again in the meantime.
 - **The snapshot is written atomically** (temporary file, then rename), so an interrupted write can never leave a truncated file that reads as "everything vanished".
-- **A corrupt snapshot is quarantined, never discarded.** It is moved to `snapshot.json.corrupt-<n>` and the tool says so in its output. The alternative — silently resetting — would lose pending changes with no way to tell that from "nothing happened".
+- **A corrupt snapshot is quarantined, never discarded.** It is moved to `snapshot.json.corrupt-<n>` and the tool says so in its output, including when the check fails afterwards — the move is irreversible, so that message is the only chance to report it.
 
 ## Known limitations
 
