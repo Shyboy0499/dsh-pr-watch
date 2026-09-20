@@ -35,8 +35,11 @@ import { renderWatch, type WatchOpenEntry, type WatchValue } from "./watch";
  *
  * Two promises are kept here and nowhere else. "Reported once, then silent"
  * holds because the snapshot is the only memory and this is its only writer.
- * "A failed fetch writes nothing" holds because a round that could not complete
- * returns before the save, leaving the previous snapshot byte for byte intact.
+ * "A failed enumeration writes nothing" holds because a round whose one `gh
+ * search` call did not succeed returns before the save, leaving the previous
+ * snapshot byte for byte intact. A failure in the resolve phase is narrower than
+ * that: the outcomes that *were* determined are still recorded, and the single
+ * entry that could not be resolved is retried rather than marked as seen.
  * ---------------------------------------------------------------------- */
 
 /** Largest accepted threshold, so a unit mix-up cannot silently disable alerts. */
@@ -126,12 +129,24 @@ export type WatchOutcome =
   | { readonly status: "failed"; readonly message: string };
 
 /**
+ * Prefix a failure with a warning that is still true.
+ *
+ * A quarantine is an irreversible move to a new path. A round can fail for an
+ * unrelated reason after it has already happened, and the warning is the only
+ * record the user will get of where their state went -- the next run loads a
+ * missing file rather than a damaged one, so it can never mention it again.
+ */
+function withWarning(warning: string | null, message: string): string {
+  return warning === null ? message : `${warning} ${message}`;
+}
+
+/**
  * Run one check and produce the report contents.
  *
  * Order matters throughout. The snapshot is read first, so a corrupt file is
  * quarantined before anything depends on it. Phase 1 precedes phase 2, so the
  * second phase can be limited to entries that actually left the open set. And
- * the save happens last, after every `gh` call has succeeded.
+ * the save happens last, once every call that could be made has been made.
  *
  * @returns the report value, or a message explaining why the round was abandoned.
  */
@@ -185,10 +200,18 @@ export async function buildWatchValue(
     executor: options.executor,
   });
   if (phaseOneCall.status === "failed") {
-    // "A failed fetch writes nothing": return before the save, so the previous
-    // snapshot keeps its bytes and its mtime and pending changes survive to the
-    // next successful run.
-    return { status: "failed", message: phaseOneCall.message };
+    // "A failed enumeration writes nothing": return before the save, so the
+    // previous snapshot keeps its bytes and its mtime and pending changes
+    // survive to the next successful run.
+    //
+    // The quarantine notice is kept even though the round failed. The file was
+    // already moved above, and that is irreversible; reporting only the `gh`
+    // error would leave the user with a failure and no idea where their state
+    // went, and the next run would find a missing file and could never say.
+    return {
+      status: "failed",
+      message: withWarning(warning, phaseOneCall.message),
+    };
   }
 
   const mapped = mapPhaseOne(phaseOneCall.stdout, PHASE_ONE_RESULT_LIMIT);
@@ -198,7 +221,10 @@ export async function buildWatchValue(
     // departures and announce merges that never happened.
     return {
       status: "failed",
-      message: `Could not read the open pull request list (${mapped.problem}): ${mapped.detail}`,
+      message: withWarning(
+        warning,
+        `Could not read the open pull request list (${mapped.problem}): ${mapped.detail}`,
+      ),
     };
   }
 
@@ -211,23 +237,27 @@ export async function buildWatchValue(
     warning = warning === null ? note : `${warning} ${note}`;
   }
 
-  // ---- 3/4. Phase 2: resolve only what left the open set. ----------------
-  // Asking `diff` which entries departed keeps that rule in one place rather
-  // than reimplementing "absent from open" here. The intermediate result is
-  // discarded: its `unresolved` entries are precisely the ones being resolved,
-  // so running the comparison twice is the cost of not duplicating the rule.
-  const probe = diff(previous, open, new Map(), now, { staleDays });
-  const departures = probe.deltas
-    .filter((delta) => delta.kind === "unresolved")
-    .map((delta) => delta.key);
+  // ---- 3/4. Phase 2: resolve every entry that left the open set. ---------
+  // "Absent from the open set and not already terminal" is derived here rather
+  // than read off `diff`'s `unresolved` deltas, because that delta is *suppressed*
+  // once an entry has been reported as departed (`departedReported`) while the
+  // resolve attempt has to keep happening until an outcome is known. Driving the
+  // retry from the report would strand an entry the moment its first lookup
+  // failed: nothing would ever ask GitHub about it again, and its eventual merge
+  // would never be announced.
+  const departures: string[] = [];
+  for (const [key, record] of Object.entries(previous.pullRequests)) {
+    if (record.state !== "OPEN") continue;
+    if (open[key] !== undefined) continue;
+    departures.push(key);
+  }
 
   const resolved = new Map<string, TerminalState>();
   const completed = new Map<string, PrRecord>();
 
   for (const key of departures) {
     const previousEntry = previous.pullRequests[key];
-    const url = previousEntry?.url;
-    if (url === undefined) continue;
+    const url = previousEntry.url;
 
     const detail = await runGh(phaseTwoArgs(url), {
       executor: options.executor,
@@ -273,16 +303,18 @@ export async function buildWatchValue(
     open: openEntries,
   };
 
-  // ---- 7. Record, but only when the round is trustworthy. ----------------
-  // Anything left unresolved means a `gh` call did not succeed. Recording the
-  // round would set `departedReported` on an entry whose outcome nobody
-  // determined, and that pull request's terminal state would then never be
-  // reported at all. Deferring the whole write costs one repeated report next
-  // time; writing costs the outcome permanently.
-  if (final.deltas.some((delta) => delta.kind === "unresolved")) {
-    return { status: "ok", value };
-  }
-
+  // ---- 7. Record the round. ----------------------------------------------
+  // Always, including a round that contains an unresolved departure. Not
+  // recording it was the smaller-looking choice, but it is not: use of it would
+  // freeze *every* other result at this baseline, so a merge or a staleness
+  // determined in the same round would be re-reported on every later check until
+  // the unresolved entry finally cleared -- and an entry that can never be
+  // resolved (a deleted repository, a lost permission) would never clear at all.
+  //
+  // Recording is not the same as marking an unknown outcome as seen. The entry
+  // that could not be resolved keeps `state: OPEN` and is picked up again by the
+  // departure sweep above, so its outcome is still reported the first time it
+  // becomes known.
   await saveSnapshot(path, pruneTerminal(final.next, now, DEFAULT_PRUNE_DAYS));
 
   return { status: "ok", value };

@@ -480,7 +480,7 @@ describe("buildWatchValue — reported once, then silent", () => {
   });
 });
 
-describe("buildWatchValue — a failed fetch writes nothing", () => {
+describe("buildWatchValue — a failed enumeration writes nothing", () => {
   it("leaves the snapshot bytes and mtime untouched when phase 1 fails", async () => {
     await withTempDirectory(async (directory) => {
       const path = join(directory, "snapshot.json");
@@ -568,78 +568,103 @@ describe("buildWatchValue — a failed fetch writes nothing", () => {
       expect(readFileSync(path).equals(before)).toBe(true);
     });
   });
+});
 
-  it("writes nothing when a resolve fails, and retries it next time", async () => {
+describe("buildWatchValue — a failed resolve is retried without repeating the round", () => {
+  it("records the round, keeps the entry open, and retries it silently", async () => {
     await withTempDirectory(async (directory) => {
       const path = join(directory, "snapshot.json");
       await run(
         directory,
         recorder(succeeds(JSON.stringify([searchPr()]))).executor,
       );
-      const before = readFileSync(path);
-      const beforeMtime = statSync(path).mtimeMs;
 
       // The pull request left the open set, and the resolve call fails.
       const failing = recorder(
         succeeds("[]"),
         fails(1, "dial tcp: i/o timeout"),
       );
-      const second = await run(directory, failing.executor);
+      const second = expectOk(await run(directory, failing.executor));
+      expect(KINDS(second)).toEqual(["unresolved"]);
 
-      expect(second.status).toBe("ok");
-      // The report still names the departure as unconfirmed...
-      if (second.status !== "ok") throw new Error("unreachable");
-      expect(KINDS(second.value)).toEqual(["unresolved"]);
-      // ...but nothing was recorded, because marking it seen would set a flag
-      // on an outcome nobody determined.
-      expect(readFileSync(path).equals(before)).toBe(true);
-      expect(statSync(path).mtimeMs).toBe(beforeMtime);
+      // The round is recorded. The entry keeps `OPEN`, because its outcome is
+      // still unknown, and gains the marker that stops the same departure being
+      // announced again.
+      const stored = await loadSnapshot(path);
+      if (stored.status !== "ok") throw new Error("expected ok");
+      const entry = stored.snapshot.pullRequests["octo/repo#7"];
+      expect(entry.state).toBe("OPEN");
+      expect(entry.departedReported).toBe(true);
 
-      // The next run still reports it, so the outcome was not lost.
-      const third = await run(
-        directory,
-        recorder(succeeds("[]"), fails(1, "still down")).executor,
+      // The next run asks `gh` again -- the retry is driven by the departure
+      // itself, not by the report -- but stays silent about it.
+      const retry = recorder(succeeds("[]"), fails(1, "still down"));
+      const third = expectOk(await run(directory, retry.executor));
+      expect(retry.calls.filter((call) => call.args[0] === "pr")).toHaveLength(
+        1,
       );
-      if (third.status !== "ok") throw new Error("unreachable");
-      expect(third.value.deltas).toHaveLength(1);
-      expect(third.value.deltas[0].kind).toBe("unresolved");
+      expect(third.deltas).toEqual([]);
+
+      // And the outcome is still reported the first time it can be determined.
+      const resolved = recorder(
+        succeeds("[]"),
+        succeeds(JSON.stringify(viewPr())),
+      );
+      const fourth = expectOk(await run(directory, resolved.executor));
+      expect(KINDS(fourth)).toEqual(["merged"]);
     });
   });
 
-  it("writes nothing when a resolve returns an unparsable payload", async () => {
+  it("does not re-report a merge that happened in the same round as a failure", async () => {
+    await withTempDirectory(async (directory) => {
+      const path = join(directory, "snapshot.json");
+      const two = JSON.stringify([
+        searchPr(),
+        searchPr({ number: 8, url: "https://github.com/octo/repo/pull/8" }),
+      ]);
+      await run(directory, recorder(succeeds(two)).executor);
+
+      // Both depart. #7 resolves as merged; #8's lookup fails -- and can keep
+      // failing forever, which is the case that used to freeze the snapshot.
+      const first = recorder(
+        succeeds("[]"),
+        succeeds(JSON.stringify(viewPr())),
+        fails(1, "permanently unavailable"),
+      );
+      const second = expectOk(await run(directory, first.executor));
+      expect(KINDS(second)).toEqual(["merged", "unresolved"]);
+
+      const stored = await loadSnapshot(path);
+      if (stored.status !== "ok") throw new Error("expected ok");
+      expect(stored.snapshot.pullRequests["octo/repo#7"].state).toBe("MERGED");
+
+      // #7 is terminal and #8 was already reported, so this round says nothing.
+      // While the round went unrecorded, the merge was announced every check.
+      const third = expectOk(
+        await run(
+          directory,
+          recorder(succeeds("[]"), fails(1, "down")).executor,
+        ),
+      );
+      expect(third.deltas).toEqual([]);
+    });
+  });
+
+  it("treats an unparsable resolve payload as unresolved, and still records the round", async () => {
     await withTempDirectory(async (directory) => {
       const path = join(directory, "snapshot.json");
       await run(
         directory,
         recorder(succeeds(JSON.stringify([searchPr()]))).executor,
       );
-      const before = readFileSync(path);
 
       const exec = recorder(succeeds("[]"), succeeds("{ not json"));
-      const outcome = await run(directory, exec.executor);
+      const outcome = expectOk(await run(directory, exec.executor));
+      expect(KINDS(outcome)).toEqual(["unresolved"]);
 
-      if (outcome.status !== "ok") throw new Error("expected ok");
-      expect(KINDS(outcome.value)).toEqual(["unresolved"]);
-      expect(readFileSync(path).equals(before)).toBe(true);
-    });
-  });
-
-  it("does not mark anything seen on an unresolved round", async () => {
-    await withTempDirectory(async (directory) => {
-      await run(
-        directory,
-        recorder(succeeds(JSON.stringify([searchPr()]))).executor,
-      );
-      await run(directory, recorder(succeeds("[]"), fails(1, "down")).executor);
-
-      const stored = await loadSnapshot(join(directory, "snapshot.json"));
+      const stored = await loadSnapshot(path);
       if (stored.status !== "ok") throw new Error("expected ok");
-
-      // The entry kept its place and its flags, which is what makes the next
-      // check try again.
-      const entry = stored.snapshot.pullRequests["octo/repo#7"];
-      expect(entry.state).toBe("OPEN");
-      expect(entry.departedReported).toBe(false);
+      expect(stored.snapshot.pullRequests["octo/repo#7"].state).toBe("OPEN");
     });
   });
 });
@@ -743,6 +768,30 @@ describe("buildWatchValue — a corrupt snapshot is quarantined and the round co
       // damaged file is still recoverable beside it.
       expect(outcome.status).toBe("failed");
       expect(readFileSync(`${path}.corrupt-1`, "utf8")).toBe("{ broken");
+
+      // And the user is still told where it went. The move is irreversible, and
+      // the next run loads a missing file rather than a damaged one, so this
+      // failure is the only chance to mention it.
+      if (outcome.status !== "failed") throw new Error("unreachable");
+      expect(outcome.message).toContain("moved to");
+      expect(outcome.message).toContain("snapshot.json.corrupt-1");
+      expect(outcome.message).toContain("down");
+    });
+  });
+
+  it("keeps the quarantine notice when the open list cannot be parsed", async () => {
+    await withTempDirectory(async (directory) => {
+      const path = join(directory, "snapshot.json");
+      writeFileSync(path, "{ broken");
+
+      const outcome = await run(
+        directory,
+        recorder(succeeds("[{ oops")).executor,
+      );
+
+      expect(outcome.status).toBe("failed");
+      if (outcome.status !== "failed") throw new Error("unreachable");
+      expect(outcome.message).toContain("snapshot.json.corrupt-1");
     });
   });
 });
