@@ -37,8 +37,9 @@ export interface WatchValue {
   readonly trackedCount: number; /** The changes to report. `diff()` returns these already ordered. */
   readonly deltas: readonly Delta[];
   /**
-   * A snapshot problem worth surfacing before anything else, such as a corrupt
-   * file that was quarantined. The README requires the tool to say so.
+   * A problem worth surfacing before anything else: a corrupt snapshot that was
+   * quarantined, or a departure whose resolve failed and left its outcome
+   * unknown. Either way the README requires the tool to say so.
    */
   readonly warning: string | null;
   /**

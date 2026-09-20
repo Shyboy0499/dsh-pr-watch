@@ -615,6 +615,84 @@ describe("buildWatchValue — a failed resolve is retried without repeating the 
     });
   });
 
+  it("says why the resolve failed, and only in the round that announces it", async () => {
+    await withTempDirectory(async (directory) => {
+      await run(
+        directory,
+        recorder(succeeds(JSON.stringify([searchPr()]))).executor,
+      );
+
+      // The first failure carries the classified cause, which the generic
+      // "could not be resolved" note cannot distinguish on its own.
+      const first = expectOk(
+        await run(
+          directory,
+          recorder(succeeds("[]"), fails(1, "API rate limit exceeded"))
+            .executor,
+        ),
+      );
+      expect(first.warning).toContain("octo/repo#7");
+      expect(first.warning).toContain("API rate limit exceeded");
+      expect(renderWatch(first, false)).toContain("⚠️");
+
+      // The retry is silent, so it must not re-raise the warning either: a
+      // permanently unresolvable entry would otherwise warn on every check.
+      const second = expectOk(
+        await run(
+          directory,
+          recorder(succeeds("[]"), fails(1, "API rate limit exceeded"))
+            .executor,
+        ),
+      );
+      expect(second.deltas).toEqual([]);
+      expect(second.warning).toBeNull();
+    });
+  });
+
+  it("names only the departure it announces, not every failed call", async () => {
+    await withTempDirectory(async (directory) => {
+      const two = JSON.stringify([
+        searchPr(),
+        searchPr({ number: 8, url: "https://github.com/octo/repo/pull/8" }),
+      ]);
+      await run(directory, recorder(succeeds(two)).executor);
+
+      // Round 2: only #7 departs, and its resolve fails, so #7 is reported and
+      // marked. #8 is still open.
+      const first = expectOk(
+        await run(
+          directory,
+          recorder(
+            succeeds(
+              JSON.stringify([
+                searchPr({
+                  number: 8,
+                  url: "https://github.com/octo/repo/pull/8",
+                }),
+              ]),
+            ),
+            fails(1, "down"),
+          ).executor,
+        ),
+      );
+      expect(KINDS(first)).toEqual(["unresolved"]);
+
+      // Round 3: both are gone. #7 is already reported and stays silent, so the
+      // report names only #8 -- and the warning has to agree, rather than
+      // counting #7's failed call again.
+      const failing = recorder(
+        succeeds("[]"),
+        fails(1, "down"),
+        fails(1, "down"),
+      );
+      const second = expectOk(await run(directory, failing.executor));
+      expect(KINDS(second)).toEqual(["unresolved"]);
+      expect(second.warning).toContain("One departure");
+      expect(second.warning).toContain("octo/repo#8");
+      expect(second.warning).not.toContain("octo/repo#7");
+    });
+  });
+
   it("does not re-report a merge that happened in the same round as a failure", async () => {
     await withTempDirectory(async (directory) => {
       const path = join(directory, "snapshot.json");
