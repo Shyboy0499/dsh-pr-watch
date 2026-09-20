@@ -53,15 +53,19 @@ function isBlank(value: string | undefined): value is undefined {
  * `/tmp/dsh`, a "rooted" path with no drive letter, and `join` then resolves it
  * against whichever drive the process happens to be on. That is the same silent
  * divergence the relative-path rejection exists to prevent, so a drive-relative
- * form is refused here. A UNC path (`\\server\share`) is accepted, because it
- * names its own location. On POSIX the platform rule is already unambiguous.
+ * form is refused here. A UNC path (`\\server\share` or `//server/share`) is
+ * accepted, because it names its own location. On POSIX the platform rule is
+ * already unambiguous.
  */
 function isUnambiguousAbsolute(
   value: string,
   platform: NodeJS.Platform,
 ): boolean {
   if (platform !== "win32") return posix.isAbsolute(value);
-  return /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\");
+  // Either slash may start a UNC path: `//server/share` is fully qualified, and
+  // `win32.join` normalises it to `\\server\share\...`. Accepting only the
+  // backslash spelling rejected a legitimate Windows path.
+  return /^[A-Za-z]:[\\/]/.test(value) || /^[\\/]{2}/.test(value);
 }
 
 /**
@@ -306,6 +310,20 @@ function toSnapshot(
 
   const pullRequests: Record<string, PrRecord> = {};
   for (const [key, entry] of Object.entries(parsed.pullRequests)) {
+    // `__proto__` is the one key whose assignment defines nothing: it reaches
+    // `Object.prototype`'s setter, so the record would vanish while the load
+    // still reported success -- silent loss, where this module's policy is loud
+    // rejection. Every real key is `owner/repo#number`, so nothing legitimate is
+    // refused. (`JSON.parse` does create it as an own property, which is why
+    // `Object.entries` sees it here at all.)
+    if (key === "__proto__") {
+      return {
+        ok: false,
+        detail:
+          '"pullRequests.__proto__" is not a usable key; snapshot keys are "owner/repo#number"',
+      };
+    }
+
     if (!isPrRecord(entry)) {
       return {
         ok: false,
@@ -859,7 +877,7 @@ function nextFreeSlot(from: string, path: string): string | null {
 /** The error raised when the slot space is used up. */
 function exhausted(path: string, limit: number): SnapshotWriteError {
   return new SnapshotWriteError(
-    `Could not quarantine ${path}: no free .corrupt-<n> slot below ${limit}. ` +
+    `Could not quarantine ${path}: no free .corrupt-<n> slot in the first ${limit}. ` +
       "No existing quarantine file was overwritten.",
     null,
   );
