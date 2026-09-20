@@ -51,14 +51,14 @@ An agent has no memory of your last check, so every status question gets re-deri
 > from a checkout — see [Installation](#installation) and
 > [What works today](#what-works-today).
 
-| Behaviour                      | Detail                                                                |
-| ------------------------------ | --------------------------------------------------------------------- |
-| **Merged**                     | A pull request you authored was merged                                |
-| **Closed without merge**       | Distinguished from a merge, not lumped in with it                     |
-| **Became stale**               | No activity for 14 days (configurable)                                |
-| **Newly noticed**              | A pull request appeared that the snapshot did not know about          |
-| **Uncloned repositories**      | Tracked by `owner/repo#number`, so a local checkout is never required |
-| **Reported once, then silent** | Merges and staleness never repeat on later checks                     |
+| Behaviour                      | Detail                                                                                                        |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| **Merged**                     | A pull request you authored was merged                                                                        |
+| **Closed without merge**       | Distinguished from a merge, not lumped in with it                                                             |
+| **Became stale**               | No activity for 14 days (configurable)                                                                        |
+| **Newly noticed**              | A pull request is open that the snapshot did not know about — including one that was closed and then reopened |
+| **Uncloned repositories**      | Tracked by `owner/repo#number`, so a local checkout is never required                                         |
+| **Reported once, then silent** | Merges and staleness never repeat on later checks                                                             |
 
 ## How it works
 
@@ -156,6 +156,7 @@ plan's refinements section for the full reasoning.
 
 - **Staleness fires on transition, and only once.** A pull request that has been stale for weeks is reported the first time it crosses the threshold, then stays quiet. If it sees new activity, the staleness clock resets and it can be reported again later.
 - **A failed enumeration writes nothing.** If the one `gh search` call fails, or its output cannot be read, the snapshot is left untouched so pending changes are not silently marked as seen. A failure in the resolve phase is narrower: every outcome that _was_ determined is still recorded, and the entry that could not be resolved stays `OPEN` and is retried on the next check — without being announced again in the meantime.
+- **A reopened pull request is announced again.** Closing is not final: if a closed pull request is open again at the next check, it is reported as newly noticed and resumes normal tracking. A merge is treated as final, since it cannot be undone.
 - **The snapshot is written atomically** (temporary file, then rename), so an interrupted write can never leave a truncated file that reads as "everything vanished".
 - **A corrupt snapshot is quarantined, never discarded.** It is moved to `snapshot.json.corrupt-<n>` and the tool says so in its output, including when the check fails afterwards — the move is irreversible, so that message is the only chance to report it.
 

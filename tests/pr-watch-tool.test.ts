@@ -906,6 +906,47 @@ describe("buildWatchValue — lifecycle across many rounds", () => {
     });
   });
 
+  it("tracks a pull request through a close and a reopen", async () => {
+    await withTempDirectory(async (directory) => {
+      const path = join(directory, "snapshot.json");
+      const open = JSON.stringify([searchPr()]);
+      const closed = JSON.stringify(viewPr({ state: "CLOSED" }));
+
+      // Round 1: noticed.
+      const first = expectOk(
+        await run(directory, recorder(succeeds(open)).executor),
+      );
+      expect(KINDS(first)).toEqual(["new"]);
+
+      // Round 2: it leaves the open set and resolves as closed.
+      const second = expectOk(
+        await run(
+          directory,
+          recorder(succeeds("[]"), succeeds(closed)).executor,
+        ),
+      );
+      expect(KINDS(second)).toEqual(["closed"]);
+
+      // Round 3: it is open again. Before this was handled it stayed `CLOSED`
+      // forever -- absent from the report and from `all` mode alike.
+      const third = expectOk(
+        await run(directory, recorder(succeeds(open)).executor),
+      );
+      expect(KINDS(third)).toEqual(["new"]);
+
+      const stored = await loadSnapshot(path);
+      if (stored.status !== "ok") throw new Error("expected ok");
+      expect(stored.snapshot.pullRequests["octo/repo#7"].state).toBe("OPEN");
+
+      // Round 4: unchanged, so the reopening is not repeated.
+      const fourth = expectOk(
+        await run(directory, recorder(succeeds(open)).executor),
+      );
+      expect(fourth.deltas).toEqual([]);
+      expect(fourth.trackedCount).toBe(1);
+    });
+  });
+
   it("prunes a terminal entry once it is older than the prune window", async () => {
     await withTempDirectory(async (directory) => {
       const path = join(directory, "snapshot.json");
