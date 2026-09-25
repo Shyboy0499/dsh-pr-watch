@@ -429,8 +429,11 @@ export const prWatchTool = defineTool({
     // internally, so the adaption belongs here at the boundary rather than
     // weakening the type the rest of the code is written against.
     //
-    // Validated here as well as in the tests, so a bad argument fails before any
-    // `gh` call or disk write rather than midway through a round.
+    // `staleDays` is validated here as well as in the tests, so a bad value
+    // fails before any `gh` call or disk write rather than midway through a
+    // round. `validateArgs` checks `all` too, but the registry's parameter
+    // schema already admits only a boolean, so that one is belt-and-braces
+    // rather than reachable in production.
     const { staleDays } = validateArgs(args);
 
     const outcome = await buildWatchValue({ now: new Date(), staleDays });
