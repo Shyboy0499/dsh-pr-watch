@@ -764,6 +764,13 @@ const QUARANTINE_MAX_ATTEMPTS = 50;
  * overwritten by the rename that follows, so it is a reservation rather than a
  * placeholder with content, and `readdir` makes it visible to another instance's
  * slot scan immediately.
+ *
+ * A crash between reserving and moving leaves an empty `.corrupt-<n>` behind.
+ * POSIX has no "rename only if absent", so an exclusive claim is the price of
+ * never overwriting an earlier quarantine, and the litter is not loss: the
+ * damaged file is still at `path`, and the next attempt steps past the empty
+ * slot. It cannot be swept by size, because a snapshot that was legitimately
+ * zero bytes quarantines to a zero-byte file too.
  */
 async function reserveExclusively(destination: string): Promise<void> {
   const handle = await open(destination, "wx");

@@ -69,7 +69,7 @@ So `pr_watch` fetches in two phases:
 1. **Enumerate** every open pull request you authored, in one call.
 2. **Resolve** each snapshot entry that _left_ that set, individually, to learn its terminal state.
 
-Only pull requests that actually changed incur a second call — normally zero or one per check.
+Only pull requests that actually changed incur a second call — normally zero or one per check. An entry that has left the open set but cannot be resolved is retried on each check until its outcome is known, so it adds one call per check in the meantime.
 
 ## Installation
 
@@ -174,6 +174,10 @@ plan's refinements section for the full reasoning.
 **A pull request opened _and_ merged between two checks is invisible.** It is absent from the open set (it already merged) and absent from the snapshot (it did not exist when the snapshot was taken), so neither phase sees it. This is a direct consequence of enumerating by current state rather than by activity window, and it only becomes likely if you check infrequently. The fix — an activity-window query — is recorded in the design doc as a v2 candidate.
 
 **New comments and reviews are not reported.** An outcome like "merged" is not the same as "a maintainer replied asking for changes", and the latter is often what should change your next action. It is deferred rather than overlooked: it needs a separate data source and a per-entry comment cursor.
+
+**Reopening is taken at the enumeration's word.** Whether a closed pull request is open again is decided from the same `gh search` listing as everything else. If that listing is stale and names a pull request that is still closed, it is announced as newly noticed, and when it clears, reported closed a second time. Confirming every reappearance with `gh pr view` would cost a lookup per candidate to guard against a rare disagreement, so the listing is trusted instead.
+
+**An outcome older than the prune window is forgotten.** Entries are dropped 90 days after reaching a terminal state, and that is the point — the snapshot stays bounded. The consequence is that the record of "already reported" goes with them: if the enumeration later lists such a pull request as open (a stale index can), it is announced as newly noticed, and a subsequent departure reports the outcome again. Keeping a tombstone for every pruned key would restore the guarantee, but it would store nearly as much as the entries pruning exists to remove.
 
 **CI status is not reported.**
 
