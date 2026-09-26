@@ -58,7 +58,7 @@ An agent has no memory of your last check, so every status question gets re-deri
 | **Became stale**               | No activity for 14 days (configurable)                                                                        |
 | **Newly noticed**              | A pull request is open that the snapshot did not know about — including one that was closed and then reopened |
 | **Uncloned repositories**      | Tracked by `owner/repo#number`, so a local checkout is never required                                         |
-| **Reported once, then silent** | Merges and staleness never repeat on later checks                                                             |
+| **Reported once, then silent** | Merges and staleness never repeat on later checks, for as long as a pruned outcome is remembered              |
 
 ## How it works
 
@@ -147,11 +147,12 @@ Run it a second time and only genuine changes appear. A merge reported today is 
 v1 exposes everything through the tool's two parameters above. It reads no
 settings file, so there is nothing else to configure yet.
 
-| Setting       | Default                            | Settable in v1                    | Purpose                                                                |
-| ------------- | ---------------------------------- | --------------------------------- | ---------------------------------------------------------------------- |
-| `staleDays`   | `14`                               | Yes — tool parameter              | Days without activity before a pull request is reported stale          |
-| `pruneDays`   | `90`                               | No — compile-time constant        | Drop entries that reached a terminal state this long ago               |
-| Snapshot path | `$DSH_HOME/pr-watch/snapshot.json` | No — derived from the environment | Falls back to `~/.dsh/pr-watch/snapshot.json` when `DSH_HOME` is unset |
+| Setting         | Default                            | Settable in v1                    | Purpose                                                                 |
+| --------------- | ---------------------------------- | --------------------------------- | ----------------------------------------------------------------------- |
+| `staleDays`     | `14`                               | Yes — tool parameter              | Days without activity before a pull request is reported stale           |
+| `pruneDays`     | `90`                               | No — compile-time constant        | Drop entries that reached a terminal state this long ago                |
+| `forgottenDays` | `180`                              | No — compile-time constant        | How long a pruned outcome is remembered before it can be reported again |
+| Snapshot path   | `$DSH_HOME/pr-watch/snapshot.json` | No — derived from the environment | Falls back to `~/.dsh/pr-watch/snapshot.json` when `DSH_HOME` is unset  |
 
 Two further keys appear in the [design doc](docs/superpowers/specs/2026-09-10-dsh-pr-watch-design.md) —
 `ignoreRepos` and a user-settable `snapshotPath` — but they are **deferred to v2
@@ -177,7 +178,7 @@ plan's refinements section for the full reasoning.
 
 **Reopening is taken at the enumeration's word.** Whether a closed pull request is open again is decided from the same `gh search` listing as everything else. If that listing is stale and names a pull request that is still closed, it is announced as newly noticed, and when it clears, reported closed a second time. Confirming every reappearance with `gh pr view` would cost a lookup per candidate to guard against a rare disagreement, so the listing is trusted instead.
 
-**An outcome older than the prune window is forgotten.** Entries are dropped 90 days after reaching a terminal state, and that is the point — the snapshot stays bounded. The consequence is that the record of "already reported" goes with them: if the enumeration later lists such a pull request as open (a stale index can), it is announced as newly noticed, and a subsequent departure reports the outcome again. Keeping a tombstone for every pruned key would restore the guarantee, but it would store nearly as much as the entries pruning exists to remove.
+**A pruned outcome is remembered for 180 days, then forgotten for good.** Entries are dropped 90 days after reaching a terminal state, so the snapshot stays bounded — but the record being dropped is also the only evidence the outcome was reported. A pruned entry therefore leaves a two-field memory behind (the state and when it was pruned), and a departure that later resolves to that same state is not announced again while the memory lasts. That is what keeps "a merge is never reported twice" true across pruning. Once the memory ages out the key is genuinely gone: if the enumeration then lists it as open (a stale index can), it is announced as newly noticed, and a later departure can report the outcome a second time.
 
 **CI status is not reported.**
 

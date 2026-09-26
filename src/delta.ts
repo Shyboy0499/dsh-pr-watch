@@ -1,8 +1,10 @@
 import {
+  DEFAULT_FORGOTTEN_DAYS,
   DEFAULT_PRUNE_DAYS,
   DEFAULT_STALE_DAYS,
   SNAPSHOT_VERSION,
   type Delta,
+  type ForgottenOutcome,
   type PrRecord,
   type Snapshot,
   type TerminalState,
@@ -197,6 +199,12 @@ export function diff(
   const next: Record<string, PrRecord> = {};
   const stillOpen: Record<string, PrRecord> = { ...open };
 
+  // Memories of outcomes whose records were pruned. Carried forward by default,
+  // and spent only when the outcome they describe is reached again, so a key
+  // that never returns keeps its memory until `pruneTerminal` ages it out.
+  // Spreading an absent map is a no-op, so no fallback is needed.
+  const remembered: Record<string, ForgottenOutcome> = { ...prev.forgotten };
+
   for (const [key, previous] of Object.entries(prev.pullRequests)) {
     // 1. Terminal entries are history. Carry them through untouched, and drop
     //    them from the open sweep so a stray enumeration cannot re-announce
@@ -254,9 +262,21 @@ export function diff(
 
       // Resolved: the state itself is the record, so the departure flag is
       // spent and is cleared. This is what lets the entry go quiet for good.
-      deltas.push(
-        toDelta(terminal === "MERGED" ? "merged" : "closed", key, previous),
-      );
+      //
+      // The memory is consulted first. A record is pruned 90 days after its
+      // outcome, and a feed that then lists that pull request as open again
+      // brings the key back with no record behind it, so this departure can
+      // resolve to the very state already reported. Announcing it again would
+      // break the one guarantee the whole design rests on -- an outcome is
+      // reported once -- so a matching memory suppresses the report. The state
+      // is still recorded; the record simply replaces the memory it spent.
+      const prior = remembered[key];
+      if (prior === undefined || prior.state !== terminal) {
+        deltas.push(
+          toDelta(terminal === "MERGED" ? "merged" : "closed", key, previous),
+        );
+      }
+      delete remembered[key];
       next[key] = { ...previous, state: terminal, departedReported: false };
       continue;
     }
@@ -298,14 +318,14 @@ export function diff(
   // one kind, so no pull request can appear twice.
   deltas.sort(compareDeltas);
 
-  return {
-    deltas,
-    next: {
-      version: SNAPSHOT_VERSION,
-      lastCheck: now.toISOString(),
-      pullRequests: next,
-    },
+  const nextSnapshot: Snapshot = {
+    version: SNAPSHOT_VERSION,
+    lastCheck: now.toISOString(),
+    pullRequests: next,
   };
+  if (Object.keys(remembered).length > 0) nextSnapshot.forgotten = remembered;
+
+  return { deltas, next: nextSnapshot };
 }
 
 /**
@@ -338,18 +358,46 @@ export function diff(
  * An entry whose `updatedAt` cannot be parsed is kept: its age is unknown, so
  * it cannot be shown to be past the window, and dropping it would discard a
  * recorded outcome silently.
+ *
+ * Pruning a record leaves a {@link ForgottenOutcome} behind, because the record
+ * being dropped is also the only evidence the outcome was reported. That memory
+ * is itself aged out at `forgottenDays`, measured from the pruning, so a record
+ * pruned late still leaves a memory with a full window ahead of it. A memory
+ * whose `since` cannot be parsed is kept for the same reason an unparseable
+ * record is.
  */
 export function pruneTerminal(
   snapshot: Snapshot,
   now: Date,
   pruneDays: number = DEFAULT_PRUNE_DAYS,
+  forgottenDays: number = DEFAULT_FORGOTTEN_DAYS,
 ): Snapshot {
   const kept: Record<string, PrRecord> = {};
+  const remembered: Record<string, ForgottenOutcome> = {};
+
+  for (const [key, memory] of Object.entries(snapshot.forgotten ?? {})) {
+    const age = ageInDays(memory.since, now);
+    if (age !== null && age > forgottenDays) continue;
+    remembered[key] = memory;
+  }
+
   for (const [key, item] of Object.entries(snapshot.pullRequests)) {
     const isTerminal = item.state !== "OPEN";
     const age = ageInDays(item.updatedAt, now);
-    if (isTerminal && age !== null && age > pruneDays) continue;
+    if (isTerminal && age !== null && age > pruneDays) {
+      // `isTerminal` means one of the two states a memory can hold; the record's
+      // own narrowing does not survive the interface, so it is restated here.
+      if (item.state === "MERGED" || item.state === "CLOSED") {
+        remembered[key] = { state: item.state, since: now.toISOString() };
+      }
+      continue;
+    }
     kept[key] = item;
   }
-  return { ...snapshot, pullRequests: kept };
+
+  const pruned: Snapshot = { ...snapshot, pullRequests: kept };
+  if (Object.keys(remembered).length > 0) pruned.forgotten = remembered;
+  else delete pruned.forgotten;
+
+  return pruned;
 }

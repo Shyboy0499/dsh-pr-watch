@@ -1020,6 +1020,63 @@ describe("buildWatchValue — lifecycle across many rounds", () => {
     });
   });
 
+  it("does not report a merge twice after the record was pruned", async () => {
+    await withTempDirectory(async (directory) => {
+      const path = join(directory, "snapshot.json");
+      const open = JSON.stringify([searchPr()]);
+
+      // Round 1: noticed.
+      expectOk(await run(directory, recorder(succeeds(open)).executor));
+
+      // Round 2: it merged long ago, so this save both reports the merge and
+      // prunes the record it just wrote.
+      const longAgo = daysAgo(200);
+      const mergedAgo = JSON.stringify(
+        viewPr({ updatedAt: longAgo, mergedAt: longAgo }),
+      );
+      const second = expectOk(
+        await run(
+          directory,
+          recorder(succeeds("[]"), succeeds(mergedAgo)).executor,
+        ),
+      );
+      expect(KINDS(second)).toEqual(["merged"]);
+
+      const afterPrune = await loadSnapshot(path);
+      if (afterPrune.status !== "ok") throw new Error("expected ok");
+      expect(afterPrune.snapshot.pullRequests["octo/repo#7"]).toBeUndefined();
+      // Stamped when the record was pruned, not when it merged.
+      expect(afterPrune.snapshot.forgotten?.["octo/repo#7"]).toEqual({
+        state: "MERGED",
+        since: NOW.toISOString(),
+      });
+
+      // Round 3: a stale enumeration lists it as open again.
+      const third = expectOk(
+        await run(directory, recorder(succeeds(open)).executor),
+      );
+      expect(KINDS(third)).toEqual(["new"]);
+
+      // Round 4: it departs again and resolves to the same merge. The memory is
+      // the only thing that stops this being a second report.
+      const fourth = expectOk(
+        await run(
+          directory,
+          recorder(succeeds("[]"), succeeds(mergedAgo)).executor,
+        ),
+      );
+      expect(fourth.deltas).toEqual([]);
+
+      // The outcome is still known -- as a record, or as the memory of one.
+      const stored = await loadSnapshot(path);
+      if (stored.status !== "ok") throw new Error("expected ok");
+      const known =
+        stored.snapshot.pullRequests["octo/repo#7"]?.state ??
+        stored.snapshot.forgotten?.["octo/repo#7"]?.state;
+      expect(known).toBe("MERGED");
+    });
+  });
+
   it("prunes a terminal entry once it is older than the prune window", async () => {
     await withTempDirectory(async (directory) => {
       const path = join(directory, "snapshot.json");

@@ -1,4 +1,4 @@
-import type { PrRecord, Snapshot } from "../src/types";
+import type { ForgottenOutcome, PrRecord, Snapshot } from "../src/types";
 import { SNAPSHOT_VERSION } from "../src/types";
 
 /** A fixed clock. Every pure test uses this so results never depend on wall time. */
@@ -25,9 +25,18 @@ export function record(overrides: Partial<PrRecord> = {}): PrRecord {
   };
 }
 
-/** A snapshot containing the given records. */
+/** A snapshot containing the given records, and any remembered outcomes. */
 export function snapshot(
   pullRequests: Record<string, PrRecord> = {},
+  forgotten?: Record<string, ForgottenOutcome>,
 ): Snapshot {
-  return { version: SNAPSHOT_VERSION, lastCheck: daysAgo(1), pullRequests };
+  const value: Snapshot = {
+    version: SNAPSHOT_VERSION,
+    lastCheck: daysAgo(1),
+    pullRequests,
+  };
+  // Left absent rather than empty when there is nothing to remember, matching
+  // what the loader and `diff` produce.
+  if (forgotten !== undefined) value.forgotten = forgotten;
+  return value;
 }

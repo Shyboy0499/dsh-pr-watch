@@ -13,6 +13,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, posix, win32 } from "node:path";
 import {
   SNAPSHOT_VERSION,
+  type ForgottenOutcome,
   type PrRecord,
   type PrState,
   type Snapshot,
@@ -262,6 +263,21 @@ function isPrRecord(value: unknown): value is PrRecord {
 }
 
 /**
+ * Whether `value` is a well-formed {@link ForgottenOutcome}.
+ *
+ * Only the two terminal states are accepted: a memory exists to stop a finished
+ * outcome being reported twice, so `OPEN` here would be a claim about a pull
+ * request that has not finished.
+ */
+function isForgottenOutcome(value: unknown): value is ForgottenOutcome {
+  if (!isPlainObject(value)) return false;
+  return (
+    (value.state === "MERGED" || value.state === "CLOSED") &&
+    typeof value.since === "string"
+  );
+}
+
+/**
  * Validate parsed JSON as a `Snapshot`, returning either the value or the
  * reason it is not one.
  *
@@ -333,14 +349,49 @@ function toSnapshot(
     pullRequests[key] = entry;
   }
 
-  return {
-    ok: true,
-    snapshot: {
-      version: parsed.version,
-      lastCheck: parsed.lastCheck,
-      pullRequests,
-    },
+  // Absent means "nothing has been forgotten yet". An empty object is accepted
+  // and normalised away, so a file written by an older build and one written by
+  // a newer one round-trip to the same value.
+  let forgotten: Record<string, ForgottenOutcome> | undefined;
+  if (parsed.forgotten !== undefined) {
+    if (!isPlainObject(parsed.forgotten)) {
+      return {
+        ok: false,
+        detail: `"forgotten" must be an object, got ${describe(parsed.forgotten)}`,
+      };
+    }
+
+    const remembered: Record<string, ForgottenOutcome> = {};
+    for (const [key, entry] of Object.entries(parsed.forgotten)) {
+      // Same trap as `pullRequests`, and the same answer: assignment would
+      // reach the prototype setter and drop the memory silently.
+      if (key === "__proto__") {
+        return {
+          ok: false,
+          detail:
+            '"forgotten.__proto__" is not a usable key; snapshot keys are "owner/repo#number"',
+        };
+      }
+      if (!isForgottenOutcome(entry)) {
+        return {
+          ok: false,
+          detail: `"forgotten.${key}" is not a valid remembered outcome (${describe(entry)})`,
+        };
+      }
+      remembered[key] = entry;
+    }
+
+    if (Object.keys(remembered).length > 0) forgotten = remembered;
+  }
+
+  const snapshot: Snapshot = {
+    version: parsed.version,
+    lastCheck: parsed.lastCheck,
+    pullRequests,
   };
+  if (forgotten !== undefined) snapshot.forgotten = forgotten;
+
+  return { ok: true, snapshot };
 }
 
 /** A short description of a JSON value, for diagnostics. */
