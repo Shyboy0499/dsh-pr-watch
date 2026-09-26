@@ -779,6 +779,129 @@ describe("pruneTerminal — the retention boundary", () => {
   it("reports no prune set for an empty snapshot", () => {
     expect(pruneTerminal(snapshot(), NOW).pullRequests).toEqual({});
   });
+
+  it("remembers the outcome of a record it drops", () => {
+    // The dropped record is the only evidence the outcome was reported, so the
+    // memory has to replace it or the guarantee leaves with the record.
+    const pruned = pruneTerminal(
+      snapshot({
+        "octo/repo#1": record({ state: "MERGED", updatedAt: daysAgo(200) }),
+      }),
+      NOW,
+    );
+
+    expect(pruned.pullRequests).toEqual({});
+    expect(pruned.forgotten).toEqual({
+      "octo/repo#1": { state: "MERGED", since: NOW.toISOString() },
+    });
+  });
+
+  it("remembers nothing for an entry it keeps", () => {
+    const kept = pruneTerminal(
+      snapshot({
+        "octo/repo#1": record({ state: "CLOSED", updatedAt: daysAgo(10) }),
+        "octo/repo#2": record({
+          url: "https://github.com/octo/repo/pull/2",
+          state: "OPEN",
+          updatedAt: daysAgo(5000),
+        }),
+      }),
+      NOW,
+    );
+
+    expect(kept.forgotten).toBeUndefined();
+  });
+
+  it("keeps a memory inside its window and drops one past it", () => {
+    const input = snapshot(
+      {},
+      {
+        "octo/repo#1": { state: "MERGED", since: daysAgo(179) },
+        "octo/repo#2": { state: "CLOSED", since: daysAgo(181) },
+      },
+    );
+
+    expect(Object.keys(pruneTerminal(input, NOW).forgotten ?? {})).toEqual([
+      "octo/repo#1",
+    ]);
+  });
+
+  it("keeps a memory whose timestamp cannot be parsed", () => {
+    // Its age is unknown, so it cannot be shown to be past the window, and
+    // dropping it would forget an outcome that was reported.
+    const input = snapshot(
+      {},
+      { "octo/repo#1": { state: "MERGED", since: "not a date" } },
+    );
+
+    expect(Object.keys(pruneTerminal(input, NOW).forgotten ?? {})).toEqual([
+      "octo/repo#1",
+    ]);
+  });
+});
+
+describe("diff — a remembered outcome is not reported twice", () => {
+  it("suppresses a terminal outcome whose memory matches", () => {
+    // The record was pruned, the feed then listed the pull request as open
+    // again, and now it has departed. Without the memory this is a second
+    // `merged`, which the design promises never happens.
+    const prev = snapshot(
+      { "octo/repo#1": record({ state: "OPEN" }) },
+      { "octo/repo#1": { state: "MERGED", since: daysAgo(200) } },
+    );
+    const resolved = new Map([["octo/repo#1", "MERGED" as const]]);
+
+    const { deltas, next } = diff(prev, {}, resolved, NOW);
+
+    expect(deltas).toEqual([]);
+    expect(next.pullRequests["octo/repo#1"].state).toBe("MERGED");
+    // The record carries the outcome now, so the memory is spent.
+    expect(next.forgotten).toBeUndefined();
+  });
+
+  it("still reports an outcome the memory does not match", () => {
+    const prev = snapshot(
+      { "octo/repo#1": record({ state: "OPEN" }) },
+      { "octo/repo#1": { state: "CLOSED", since: daysAgo(200) } },
+    );
+    const resolved = new Map([["octo/repo#1", "MERGED" as const]]);
+
+    const { deltas, next } = diff(prev, {}, resolved, NOW);
+
+    expect(deltas.map((delta) => delta.kind)).toEqual(["merged"]);
+    expect(next.forgotten).toBeUndefined();
+  });
+
+  it("carries a memory forward for a key that does not return", () => {
+    const prev = snapshot(
+      {},
+      { "octo/repo#1": { state: "MERGED", since: daysAgo(10) } },
+    );
+
+    const { deltas, next } = diff(prev, {}, new Map(), NOW);
+
+    expect(deltas).toEqual([]);
+    expect(next.forgotten).toEqual({
+      "octo/repo#1": { state: "MERGED", since: daysAgo(10) },
+    });
+  });
+
+  it("does not suppress a first-time outcome for a different key", () => {
+    const prev = snapshot(
+      {
+        "octo/repo#2": record({
+          url: "https://github.com/octo/repo/pull/2",
+          state: "OPEN",
+        }),
+      },
+      { "octo/repo#1": { state: "MERGED", since: daysAgo(10) } },
+    );
+    const resolved = new Map([["octo/repo#2", "MERGED" as const]]);
+
+    const { deltas } = diff(prev, {}, resolved, NOW);
+
+    expect(deltas.map((delta) => delta.kind)).toEqual(["merged"]);
+  });
 });
 
 describe("diff — all four kinds in one result", () => {

@@ -26,12 +26,42 @@ export interface PrRecord {
   departedReported: boolean;
 }
 
+/**
+ * The memory of a terminal outcome whose record has been pruned.
+ *
+ * Pruning keeps the snapshot bounded, but it also removes the only record that
+ * an outcome was already reported. This is the least that restores that
+ * guarantee: the state, plus the activity time so the memory can itself age out.
+ * It is deliberately not a `PrRecord` -- storing the title, URL and timestamps
+ * again would give back most of what pruning just saved.
+ */
+export interface ForgottenOutcome {
+  readonly state: TerminalState;
+  /**
+   * When the record was pruned, which is what ages the memory out.
+   *
+   * Measured from the pruning rather than from the outcome: a record that is
+   * only pruned long after it finished -- the tool simply was not run for a
+   * while -- would otherwise create a memory that is already past its window.
+   */
+  readonly since: string;
+}
+
 /** The on-disk snapshot. */
 export interface Snapshot {
   version: number;
   lastCheck: string;
   /** Keyed by `owner/repo#number` so uncloned repositories are addressable. */
   pullRequests: Record<string, PrRecord>;
+  /**
+   * Outcomes remembered after their record was pruned, keyed like
+   * `pullRequests`.
+   *
+   * Optional, and absent rather than empty when there is nothing to remember: a
+   * snapshot written before this existed then still loads, and an absent map
+   * means exactly what it says -- nothing has been forgotten yet.
+   */
+  forgotten?: Record<string, ForgottenOutcome>;
 }
 
 export type DeltaKind = "merged" | "closed" | "stale" | "new" | "unresolved";
@@ -48,6 +78,16 @@ export interface Delta {
 export const SNAPSHOT_VERSION = 1;
 export const DEFAULT_STALE_DAYS = 14;
 export const DEFAULT_PRUNE_DAYS = 90;
+
+/**
+ * How long a pruned outcome is remembered, measured from the pruning.
+ *
+ * Longer than the prune window on purpose: the record is dropped 90 days after
+ * it reached a terminal state, and the memory of that state then has to outlive
+ * the record it replaced. Nothing else depends on the value, so it can be
+ * changed without touching the snapshot schema.
+ */
+export const DEFAULT_FORGOTTEN_DAYS = 180;
 
 /** Stable identity for a pull request, independent of any local checkout. */
 export function prKey(ref: { nameWithOwner: string; number: number }): string {

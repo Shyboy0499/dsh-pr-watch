@@ -495,6 +495,81 @@ describe("loadSnapshot — valid snapshot", () => {
     });
   });
 
+  it("loads remembered outcomes", async () => {
+    await withTempDirectory(async (directory) => {
+      const path = join(directory, SNAPSHOT_FILE_NAME);
+      const document = {
+        ...VALID,
+        pullRequests: {},
+        forgotten: {
+          "octo/repo#7": { state: "MERGED", since: "2026-01-01T00:00:00Z" },
+        },
+      };
+      writeFileSync(path, JSON.stringify(document));
+
+      const result = await loadSnapshot(path);
+
+      expect(result.status).toBe("ok");
+      if (result.status !== "ok") throw new Error("unreachable");
+      expect(result.snapshot.forgotten).toEqual({
+        "octo/repo#7": { state: "MERGED", since: "2026-01-01T00:00:00Z" },
+      });
+    });
+  });
+
+  it("treats an empty remembered map as nothing remembered", async () => {
+    await withTempDirectory(async (directory) => {
+      const path = join(directory, SNAPSHOT_FILE_NAME);
+      writeFileSync(path, JSON.stringify({ ...VALID, forgotten: {} }));
+
+      const result = await loadSnapshot(path);
+
+      expect(result.status).toBe("ok");
+      if (result.status !== "ok") throw new Error("unreachable");
+      // Normalised away, so an older file and a newer one round-trip alike.
+      expect(result.snapshot.forgotten).toBeUndefined();
+      expect(result.snapshot).toEqual(VALID);
+    });
+  });
+
+  it("rejects a malformed remembered outcome", async () => {
+    await withTempDirectory(async (directory) => {
+      const path = join(directory, SNAPSHOT_FILE_NAME);
+      // `OPEN` is not a terminal state, so it cannot be a memory.
+      writeFileSync(
+        path,
+        JSON.stringify({
+          ...VALID,
+          forgotten: { "octo/repo#7": { state: "OPEN", since: "2026-01-01" } },
+        }),
+      );
+
+      const result = await loadSnapshot(path);
+
+      expect(result.status).toBe("corrupt");
+      if (result.status !== "corrupt") throw new Error("unreachable");
+      expect(result.reason).toBe("shape");
+      expect(result.detail).toContain("forgotten.octo/repo#7");
+    });
+  });
+
+  it("rejects a `__proto__` key among the remembered outcomes", async () => {
+    await withTempDirectory(async (directory) => {
+      const path = join(directory, SNAPSHOT_FILE_NAME);
+      writeFileSync(
+        path,
+        `{"version":${SNAPSHOT_VERSION},"lastCheck":"","pullRequests":{},` +
+          `"forgotten":{"__proto__":{"state":"MERGED","since":"2026-01-01"}}}`,
+      );
+
+      const result = await loadSnapshot(path);
+
+      expect(result.status).toBe("corrupt");
+      if (result.status !== "corrupt") throw new Error("unreachable");
+      expect(result.detail).toContain("__proto__");
+    });
+  });
+
   it("preserves marker fields without loss", async () => {
     await withTempDirectory(async (directory) => {
       const path = join(directory, SNAPSHOT_FILE_NAME);
