@@ -41,7 +41,8 @@
     "lint": "oxlint",
     "prepublishOnly": "pnpm run build",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "verify:live": "vitest run --config vitest.live.config.ts"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

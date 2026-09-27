@@ -207,6 +207,7 @@ published, so `dsh plugin --profile web add dsh-pr-watch` cannot resolve yet.
 pnpm install
 pnpm run build        # tsdown → lib/
 pnpm test             # vitest — no network access
+pnpm run verify:live  # opt-in: drives the real gh against GitHub
 pnpm run lint         # oxlint
 pnpm run typecheck    # tsc --noEmit
 pnpm run format       # prettier --write .
@@ -216,6 +217,15 @@ The test suite makes **no network requests** and never runs `gh`. `delta.ts` and
 `tools/watch.ts` are pure — no filesystem, no network, no clock — and every IO
 module takes its dependencies as arguments, so the whole pipeline is driven by
 fixtures and injected executors rather than mocks.
+
+That isolation has one blind spot, and it is not theoretical: a fixture written
+with the same wrong assumption as the code cannot catch it. `gh pr view` was
+asked for a field it does not have, so every resolve failed against the real CLI
+while every mocked test passed. `pnpm run verify:live` closes that gap. It needs
+`gh` authenticated, makes real API calls, and checks what fixtures cannot: that
+the argument lists are accepted, that live payloads map, and that a full check
+writes a snapshot and stays quiet on the second run. It is a stretch to run
+before a release, not on every commit.
 
 To check the built artifact rather than the sources, run `pnpm run build` and
 then load `lib/index.js`: it must export `name`, `inject`, `apply`, and a `tools`
