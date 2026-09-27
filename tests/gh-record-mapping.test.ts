@@ -675,13 +675,40 @@ describe("mapPhaseTwo — malformed and mismatched input", () => {
     expect(outcome.problem).toBe("bad-timestamp");
   });
 
-  it("fails on a bad identity", () => {
-    const outcome = mapPhaseTwo(
-      JSON.stringify(viewPr({ repository: { nameWithOwner: "nope" } })),
-    );
+  it("fails when the URL cannot identify the pull request", () => {
+    // `gh pr view` returns no `repository` field, so the URL is the identity.
+    // A URL that does not end in `/pull/<number>` is rejected rather than keyed
+    // under something invented.
+    const outcome = mapPhaseTwo(JSON.stringify(viewPr({ url: "not a url" })));
 
     if (outcome.status !== "failed") throw new Error("expected failure");
     expect(outcome.problem).toBe("bad-identity");
+  });
+
+  it("identifies a view record from its URL, which is all gh pr view gives", () => {
+    // The real payload, with `repository` absent. Asking gh for that field makes
+    // the whole call exit 1, so this is the shape that actually arrives.
+    const raw = viewPr();
+    delete raw.repository;
+
+    const outcome = mapPhaseTwo(JSON.stringify(raw));
+
+    if (outcome.status !== "ok") throw new Error("expected ok");
+    expect(outcome.records.key).toBe("octo/repo#7");
+    expect(outcome.records.terminal).toBe("MERGED");
+  });
+
+  it("ignores a stray repository field on a view record", () => {
+    // Identity comes from the URL, so a contradictory repository object cannot
+    // re-key the record.
+    const outcome = mapPhaseTwo(
+      JSON.stringify(
+        viewPr({ repository: { nameWithOwner: "somewhere/else" } }),
+      ),
+    );
+
+    if (outcome.status !== "ok") throw new Error("expected ok");
+    expect(outcome.records.key).toBe("octo/repo#7");
   });
 
   it("never throws, whatever the input", () => {
