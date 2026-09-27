@@ -762,6 +762,12 @@ export const PHASE_ONE_JSON_FIELDS = [
  * (`pruneTerminal` ages terminal entries by it) and renders `title`. Without
  * them the resolved record would keep the snapshot's stale timestamp and the
  * merge would be pruned against the wrong date.
+ *
+ * `repository` is deliberately NOT requested, unlike phase 1. `gh pr view` has
+ * no such field and rejects the whole call with `Unknown JSON field:
+ * "repository"` and a non-zero exit, which made every resolve fail and no merge
+ * ever be reported. The identity is taken from `url` instead, which `gh pr view`
+ * does return. Verified against `gh pr view --json` itself, not assumed.
  */
 export const PHASE_TWO_JSON_FIELDS = [
   "state",
@@ -770,7 +776,6 @@ export const PHASE_TWO_JSON_FIELDS = [
   "title",
   "url",
   "number",
-  "repository",
 ] as const;
 
 /**
@@ -907,7 +912,12 @@ const NAME_PART = /^[A-Za-z0-9._-]+$/;
 /**
  * `owner/repo#number`, from a record's `repository.nameWithOwner` and `number`.
  */
-function identityOf(
+/**
+ * Identity from the `repository` object, which `gh search prs` returns.
+ *
+ * Exactly one slash, with a non-empty owner and repository on either side.
+ */
+function identityFromRepositoryField(
   raw: Record<string, unknown>,
 ): { key: string; number: number } | null {
   const repository = raw.repository;
@@ -920,16 +930,49 @@ function identityOf(
   )
     return null;
 
-  // Exactly one slash, with a non-empty owner and repository on either side.
   const parts = nameWithOwner.split("/");
   if (parts.length !== 2) return null;
   if (!NAME_PART.test(parts[0]) || !NAME_PART.test(parts[1])) return null;
 
-  const number = raw.number;
-  if (typeof number !== "number" || !Number.isInteger(number) || number < 1)
-    return null;
+  const number = pullNumber(raw.number);
+  if (number === null) return null;
 
   return { key: prKey({ nameWithOwner, number }), number };
+}
+
+/**
+ * Identity from a pull request URL, which is all `gh pr view` offers.
+ *
+ * `gh pr view` returns no repository field and refuses to be asked for one, so
+ * the URL is the only place the owner and repository appear. The path is
+ * `<host>/<owner>/<repo>/pull/<number>`; the host is deliberately not matched,
+ * because GitHub Enterprise serves the same path on a different host.
+ *
+ * Nothing is guessed: a URL that does not end in that shape, or whose parts are
+ * not the characters a repository name allows, yields `null` and the record is
+ * rejected rather than keyed under something invented.
+ */
+function identityFromUrl(url: unknown): { key: string; number: number } | null {
+  if (typeof url !== "string") return null;
+
+  const match = /\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/.exec(url);
+  if (match === null) return null;
+
+  const [, owner, repository, rawNumber] = match;
+  if (!NAME_PART.test(owner) || !NAME_PART.test(repository)) return null;
+
+  const number = pullNumber(Number.parseInt(rawNumber, 10));
+  if (number === null) return null;
+
+  const nameWithOwner = `${owner}/${repository}`;
+  return { key: prKey({ nameWithOwner, number }), number };
+}
+
+/** A validated pull request number, or `null`. */
+function pullNumber(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1)
+    return null;
+  return value;
 }
 
 /** Why one raw record could not be read. */
@@ -955,6 +998,7 @@ interface CommonRecord {
 function readCommonRecord(
   raw: Record<string, unknown>,
   where: string,
+  identitySource: "repository" | "url",
 ): { ok: true; value: CommonRecord } | { ok: false; reason: RecordProblem } {
   for (const field of ["url", "title", "updatedAt"] as const) {
     if (typeof raw[field] !== "string") {
@@ -988,13 +1032,23 @@ function readCommonRecord(
     };
   }
 
-  const identity = identityOf(raw);
+  // The source is named by the phase rather than guessed from which fields are
+  // present: `gh search prs` always returns `repository`, `gh pr view` never
+  // does, and a phase-1 record missing it is a defect in the payload rather than
+  // an invitation to go looking elsewhere.
+  const identity =
+    identitySource === "repository"
+      ? identityFromRepositoryField(raw)
+      : identityFromUrl(raw.url);
   if (identity === null) {
     return {
       ok: false,
       reason: {
         problem: "bad-identity",
-        detail: `${where} has no usable repository.nameWithOwner/number pair`,
+        detail:
+          identitySource === "repository"
+            ? `${where} has no usable repository.nameWithOwner/number pair`
+            : `${where} has no usable pull request URL to identify it by`,
       },
     };
   }
@@ -1053,7 +1107,7 @@ function toSearchRecord(
     };
   }
 
-  const common = readCommonRecord(raw, where);
+  const common = readCommonRecord(raw, where, "repository");
   if (!common.ok) return { ok: false, reason: common.reason };
 
   return {
@@ -1109,7 +1163,7 @@ function toViewRecord(
     };
   }
 
-  return readCommonRecord(raw, where);
+  return readCommonRecord(raw, where, "url");
 }
 
 /** A short description of a JSON value, for diagnostics. */
@@ -1311,5 +1365,7 @@ export function toTerminalState(raw: string): TerminalState | undefined {
  */
 export function toPrKey(raw: unknown): string | undefined {
   if (!isObject(raw)) return undefined;
-  return identityOf(raw)?.key;
+  // The `repository` field, because this is documented as a phase-1 helper: a
+  // search result always carries it.
+  return identityFromRepositoryField(raw)?.key;
 }

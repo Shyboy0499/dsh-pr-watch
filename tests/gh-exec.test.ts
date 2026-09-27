@@ -661,6 +661,19 @@ describe("isReadOnlyInvocation — the plugin only ever looks", () => {
     ).toBe(true);
   });
 
+  it("requests exactly the fields gh pr view supports", () => {
+    // `gh pr view --json repository` exits 1 with `Unknown JSON field`, which
+    // made every resolve fail against the real CLI -- and no mocked payload can
+    // notice an impossible request. The list below was checked against a real
+    // `gh pr view --json` (all of them appear in its "Available fields"), so it
+    // is pinned: adding a field means checking it there first.
+    const args = phaseTwoArgs("https://github.com/o/r/pull/1");
+    const requested = args[args.indexOf("--json") + 1];
+
+    expect(requested).toBe("state,mergedAt,updatedAt,title,url,number");
+    expect(requested.split(",")).not.toContain("repository");
+  });
+
   it("is an allow-list, so an unknown future write verb is refused by default", () => {
     expect(isReadOnlyInvocation(["pr", "some-future-write-verb"])).toBe(false);
     expect(isReadOnlyInvocation(["release", "delete", "v1"])).toBe(false);
